@@ -1,0 +1,51 @@
+openapi: 3.0.1
+info:
+  title: Template Validator API
+  version: "1.0"
+  description: API for validating GitHub Actions YAML workflows
+servers:
+  - url: https://lambda
+paths:
+  /invoke:
+    post:
+      operationId: validateYaml
+      summary: Validate GitHub Actions YAML
+      description: Validates YAML syntax, structure, and security for GitHub Actions workflows
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - yaml_content
+              properties:
+                yaml_content:
+                  type: string
+                  description: YAML content to validate
+                validation_level:
+                  type: string
+                  description: Validation strictness level
+                  enum:
+                    - strict
+                    - normal
+                    - lenient
+                  default: normal
+      responses:
+        "200":
+          description: Validation completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  valid:
+                    type: boolean
+                  syntax:
+                    type: object
+                  secrets:
+                    type: object
+                  permissions:
+                    type: object

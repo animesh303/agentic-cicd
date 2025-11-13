@@ -1,0 +1,54 @@
+openapi: 3.0.1
+info:
+  title: Static Analyzer API
+  version: "1.0"
+  description: API for analyzing repositories for security, dependencies, and test frameworks
+servers:
+  - url: https://lambda
+paths:
+  /invoke:
+    post:
+      operationId: invokeStaticAnalyzer
+      summary: Analyze repository for security and dependencies
+      description: Analyzes a GitHub repository for Dockerfile issues, dependencies, and test frameworks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - repo_url
+              properties:
+                repo_url:
+                  type: string
+                  description: GitHub repository URL
+                branch:
+                  type: string
+                  description: Branch name (defaults to main)
+                  default: main
+                analysis_types:
+                  type: array
+                  description: Types of analysis to perform
+                  items:
+                    type: string
+                    enum:
+                      - dockerfile
+                      - dependencies
+                      - tests
+      responses:
+        "200":
+          description: Analysis completed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  dockerfile_analysis:
+                    type: array
+                  dependency_analysis:
+                    type: array
+                  test_analysis:
+                    type: object

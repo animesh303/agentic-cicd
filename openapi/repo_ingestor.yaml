@@ -1,0 +1,45 @@
+openapi: 3.0.1
+info:
+  title: Repository Ingestor API
+  version: "1.0"
+  description: API for extracting manifest files from GitHub repositories
+servers:
+  - url: https://lambda
+paths:
+  /invoke:
+    post:
+      operationId: invokeRepoIngestor
+      summary: Extract manifest files from repository
+      description: Clones a GitHub repository and extracts all manifest files
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - repo_url
+              properties:
+                repo_url:
+                  type: string
+                  description: GitHub repository URL
+                branch:
+                  type: string
+                  description: Branch name (defaults to main)
+                  default: main
+      responses:
+        "200":
+          description: Successfully extracted manifests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  repo_url:
+                    type: string
+                  branch:
+                    type: string
+                  manifests:
+                    type: object

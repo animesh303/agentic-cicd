@@ -1,0 +1,68 @@
+openapi: "3.0.1"
+info:
+  title: Agent Communication API
+  version: "1.0"
+  description: API for agents to communicate with each other and invoke Lambda functions
+paths:
+  /invoke-repo-ingestor:
+    post:
+      operationId: invokeRepoIngestor
+      description: Invoke repository ingestor Lambda to extract manifest files
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                repo_url:
+                  type: string
+                branch:
+                  type: string
+      responses:
+        "200":
+          description: Repository manifests extracted
+          
+  /invoke-static-analyzer:
+    post:
+      operationId: invokeStaticAnalyzer
+      description: Invoke static analyzer Lambda for security and dependency analysis
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                repo_url:
+                  type: string
+                branch:
+                  type: string
+                analysis_types:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Analysis results
+        
+  /validate-yaml:
+    post:
+      operationId: validateYaml
+      description: Validate GitHub Actions YAML syntax and security
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                yaml_content:
+                  type: string
+                validation_level:
+                  type: string
+                  enum: [strict, normal, lenient]
+      responses:
+        "200":
+          description: Validation results
+
