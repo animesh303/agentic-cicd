@@ -1,3 +1,6 @@
+# Data source to get AWS account ID
+data "aws_caller_identity" "current" {}
+
 # Local values for agent instruction hashes (to trigger updates when instructions change)
 locals {
   agent_instruction_hashes = {
@@ -442,6 +445,11 @@ resource "aws_bedrockagent_agent_action_group" "repo_scanner_lambda_action" {
       s3_object_key  = aws_s3_object.repo_ingestor_openapi.key
     }
   }
+
+  # Ensure Lambda permissions are created before action group
+  depends_on = [
+    aws_lambda_permission.bedrock_repo_ingestor
+  ]
 }
 
 # Action Group: Static Analyzer Lambda for Security Agent
@@ -461,6 +469,10 @@ resource "aws_bedrockagent_agent_action_group" "security_static_analyzer_action"
       s3_object_key  = aws_s3_object.static_analyzer_openapi.key
     }
   }
+
+  depends_on = [
+    aws_lambda_permission.bedrock_static_analyzer
+  ]
 }
 
 # Action Group: Template Validator Lambda for YAML Generator Agent
@@ -480,6 +492,10 @@ resource "aws_bedrockagent_agent_action_group" "yaml_validator_action" {
       s3_object_key  = aws_s3_object.template_validator_openapi.key
     }
   }
+
+  depends_on = [
+    aws_lambda_permission.bedrock_template_validator
+  ]
 }
 
 # Action Group: GitHub API for PR Manager Agent
@@ -499,6 +515,42 @@ resource "aws_bedrockagent_agent_action_group" "pr_manager_github_action" {
       s3_object_key  = aws_s3_object.github_openapi.key
     }
   }
+
+  depends_on = [
+    aws_lambda_permission.bedrock_github_api
+  ]
+}
+
+# Lambda permissions to allow Bedrock agents to invoke Lambda functions
+# These permissions grant Bedrock service permission to invoke Lambda functions on behalf of agents
+# Note: We don't use source_arn restriction as Bedrock may use different ARN formats when invoking
+resource "aws_lambda_permission" "bedrock_repo_ingestor" {
+  statement_id  = "AllowBedrockInvokeRepoIngestor"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.repo_ingestor.function_name
+  principal     = "bedrock.amazonaws.com"
+  # No source_arn restriction to allow Bedrock to invoke from any agent/alias
+}
+
+resource "aws_lambda_permission" "bedrock_static_analyzer" {
+  statement_id  = "AllowBedrockInvokeStaticAnalyzer"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.static_analyzer.function_name
+  principal     = "bedrock.amazonaws.com"
+}
+
+resource "aws_lambda_permission" "bedrock_template_validator" {
+  statement_id  = "AllowBedrockInvokeTemplateValidator"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.template_validator.function_name
+  principal     = "bedrock.amazonaws.com"
+}
+
+resource "aws_lambda_permission" "bedrock_github_api" {
+  statement_id  = "AllowBedrockInvokeGitHubAPI"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.github_api.function_name
+  principal     = "bedrock.amazonaws.com"
 }
 
 # Upload OpenAPI specs to S3
