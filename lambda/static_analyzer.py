@@ -152,18 +152,133 @@ def detect_test_files(repo_dir):
 
 def lambda_handler(event, context):
     """
-    Event: {
+    Handle both direct invocation and Bedrock agent invocation formats.
+    
+    Direct invocation:
+    {
         "repo_url": "https://github.com/owner/repo",
         "branch": "main",
-        "analysis_types": ["dockerfile", "dependencies", "tests"]  # optional
+        "analysis_types": ["dockerfile", "dependencies", "tests"]
+    }
+    
+    Bedrock agent invocation (actual format):
+    {
+        "messageVersion": "1.0",
+        "actionGroup": "...",
+        "apiPath": "/invoke",
+        "httpMethod": "POST",
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "properties": [
+                        {"name": "repo_url", "value": "..."},
+                        {"name": "branch", "value": "main"},
+                        {"name": "analysis_types", "value": [...]}
+                    ]
+                }
+            }
+        }
     }
     """
-    repo_url = event.get('repo_url') or event.get('repo')
-    branch = event.get('branch') or 'main'
-    analysis_types = event.get('analysis_types', ['dockerfile', 'dependencies', 'tests'])
+    # Initialize variables for Bedrock format
+    action_group = None
+    api_path = None
+    http_method = None
+    
+    # Handle Bedrock agent invocation format
+    if "messageVersion" in event and "actionGroup" in event:
+        # Extract parameters from requestBody.properties array
+        request_body = event.get("requestBody", {})
+        content = request_body.get("content", {})
+        json_content = content.get("application/json", {})
+        properties = json_content.get("properties", [])
+        
+        # Convert properties array to dict
+        body_data = {}
+        for prop in properties:
+            name = prop.get("name")
+            value = prop.get("value")
+            if name and value is not None:
+                body_data[name] = value
+        
+        repo_url = body_data.get("repo_url") or body_data.get("repo")
+        branch = body_data.get("branch", "main")
+        analysis_types = body_data.get("analysis_types", ["dockerfile", "dependencies", "tests"])
+        
+        # Handle array format - if analysis_types is a string, try to parse it
+        if isinstance(analysis_types, str):
+            try:
+                analysis_types = json.loads(analysis_types)
+            except:
+                # If it's a comma-separated string, split it
+                analysis_types = [t.strip() for t in analysis_types.split(",")]
+        
+        action_group = event.get("actionGroup", "unknown")
+        api_path = event.get("apiPath", "/invoke")
+        http_method = event.get("httpMethod", "POST")
+    elif "actionGroupInvocationInput" in event:
+        # Alternative Bedrock format
+        action_input = event["actionGroupInvocationInput"]
+        request_body = (
+            action_input.get("requestBody", {})
+            .get("content", {})
+            .get("application/json", {})
+        )
+        body_str = request_body.get("body", "{}")
+        
+        try:
+            body_data = json.loads(body_str) if isinstance(body_str, str) else body_str
+            repo_url = body_data.get("repo_url") or body_data.get("repo")
+            branch = body_data.get("branch", "main")
+            analysis_types = body_data.get("analysis_types", ["dockerfile", "dependencies", "tests"])
+        except Exception as e:
+            error_response = {
+                "messageVersion": "1.0",
+                "response": {
+                    "actionGroup": action_input.get("actionGroupName", "unknown"),
+                    "apiPath": action_input.get("apiPath", "/invoke"),
+                    "httpMethod": action_input.get("httpMethod", "POST"),
+                    "httpStatusCode": 400,
+                    "responseBody": {
+                        "application/json": {
+                            "body": json.dumps(
+                                {
+                                    "status": "error",
+                                    "message": f"Invalid request body: {str(e)}",
+                                }
+                            )
+                        },
+                    },
+                },
+            }
+            return error_response
+        
+        action_group = action_input.get("actionGroupName", "unknown")
+        api_path = action_input.get("apiPath", "/invoke")
+        http_method = action_input.get("httpMethod", "POST")
+    else:
+        # Handle direct invocation format
+        repo_url = event.get('repo_url') or event.get('repo')
+        branch = event.get('branch', 'main')
+        analysis_types = event.get('analysis_types', ['dockerfile', 'dependencies', 'tests'])
     
     if not repo_url:
-        return {'status': 'error', 'message': 'repo_url required'}
+        error_response = {'status': 'error', 'message': 'repo_url required'}
+        # Return in Bedrock format if invoked by agent
+        if action_group:
+            return {
+                "messageVersion": "1.0",
+                "response": {
+                    "actionGroup": action_group,
+                    "apiPath": api_path or "/invoke",
+                    "httpMethod": http_method or "POST",
+                    "httpStatusCode": 400,
+                    "responseBody": {
+                        "application/json": {"body": json.dumps(error_response)}
+                    },
+                },
+            }
+        return error_response
 
     tmpdir = tempfile.mkdtemp()
     results = {
@@ -206,10 +321,48 @@ def lambda_handler(event, context):
             results['test_analysis'] = detect_test_files(tmpdir)
         
         results['status'] = 'success'
+        
+        # Return in Bedrock format if invoked by agent
+        if action_group:
+            return {
+                "messageVersion": "1.0",
+                "response": {
+                    "actionGroup": action_group,
+                    "apiPath": api_path or "/invoke",
+                    "httpMethod": http_method or "POST",
+                    "httpStatusCode": 200,
+                    "responseBody": {
+                        "application/json": {"body": json.dumps(results)}
+                    },
+                },
+            }
+        
         return results
         
     except Exception as e:
-        return {'status': 'error', 'message': str(e)}
+        error_message = str(e)
+        print(f"Error in static_analyzer: {error_message}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        
+        error_result = {'status': 'error', 'message': error_message}
+        
+        # Return in Bedrock format if invoked by agent
+        if action_group:
+            return {
+                "messageVersion": "1.0",
+                "response": {
+                    "actionGroup": action_group,
+                    "apiPath": api_path or "/invoke",
+                    "httpMethod": http_method or "POST",
+                    "httpStatusCode": 500,
+                    "responseBody": {
+                        "application/json": {"body": json.dumps(error_result)}
+                    },
+                },
+            }
+        
+        return error_result
     finally:
         try:
             shutil.rmtree(tmpdir)

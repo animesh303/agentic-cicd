@@ -1,47 +1,48 @@
 {
   "status": "success",
-  "task_id": "test-task-1763112271",
+  "task_id": "test-task-1763138490",
   "workflow_steps": [
     {
       "step": "repo_scanner",
       "result": {
         "status": "success",
-        "completion": "{\n  \"repository_analysis\": {\n    \"languages\": [\"Markdown\"],\n    \"frameworks\": [],\n    \"build_systems\": [],\n    \"package_managers\": [],\n    \"containerization\": {\n      \"docker_files\": false,\n      \"container_configs\": []\n    },\n    \"testing\": {\n      \"frameworks\": [],\n      \"test_files\": []\n    },\n    \"infrastructure\": {\n      \"iac_tools\": [],\n      \"cloud_configs\": [],\n      \"deployment_targets\": []\n    },\n    \"summary\": \"This is a basic repository containing only markdown files. No programming languages, frameworks, or infrastructure components were detected.\"\n  }\n}"
+        "completion": "{\n  \"repository_analysis\": {\n    \"languages\": [\"Markdown\"],\n    \"frameworks\": [],\n    \"build_systems\": [],\n    \"package_managers\": [],\n    \"containerization\": {\n      \"docker_files\": false,\n      \"container_configs\": []\n    },\n    \"testing\": {\n      \"frameworks\": [],\n      \"test_files\": []\n    },\n    \"infrastructure\": {\n      \"iac_tools\": [],\n      \"cloud_configs\": [],\n      \"deployment_targets\": []\n    },\n    \"summary\": \"This is a basic repository containing only markdown files. No programming languages, frameworks, build tools, or infrastructure components were detected.\"\n  }\n}"
       }
     },
     {
       "step": "static_analyzer",
       "result": {
         "status": "error",
-        "message": "An error occurred (AccessDeniedException) when calling the Invoke operation: User: arn:aws:sts::027378719919:assumed-role/bedrock-ci-agent-lambda-exec/bedrock-ci-agent-orchestrator is not authorized to perform: lambda:InvokeFunction on resource: arn:aws:lambda:us-east-1:027378719919:function:bedrock-ci-agent-static-analyzer because no identity-based policy allows the lambda:InvokeFunction action"
+        "message": "[Errno 2] No such file or directory: 'git'"
       }
     },
     {
       "step": "pipeline_designer",
       "result": {
         "status": "success",
-        "completion": "CI/CD Pipeline Design Specification:\n\n1. Pre-Build Stage:\n   - Checkout repository\n   - Cache validation for dependencies (when added)\n   - Markdown lint check\n\n2. Security Scan Stage (Parallel execution):\n   - Markdown file security scan (sensitive content check)\n   - SAST scan placeholder (for future code)\n   - SCA scan placeholder (when dependencies added)\n   - Secret scanning\n\n3. Documentation Stage:\n   - Markdown validation\n   - Documentation generation\n   - Store documentation artifacts\n\n4. Container Stage:\n   - Create minimal nginx-based container for serving documentation\n   - Container security scan\n   - Sign container image\n   - Push to ECR with tags:\n     - latest\n     - ${COMMIT_SHA}\n\n5. Deployment Stage:\n   - ECS task definition update\n   - Fargate service update with rolling deployment\n   - Health check validation\n\nPipeline Configurations:\n- Triggers: On push to main branch, pull requests\n- Caching: \n  - Documentation artifacts\n  - Container layers\n- Environment Variables:\n  - AWS_REGION\n  - ECR_REPOSITORY\n  - ECS_CLUSTER\n  - ECS_SERVICE\n- Timeout: 30 minutes\n- Fail-Fast: Enabled\n- Artifact Retention: 14 days\n\nNote: Pipeline includes placeholders for future code additions while maintaining a functional documentation deployment pipeline for current markdown-only content."
+        "completion": "CI/CD Pipeline Design:\n\n1. Initial Stage:\n   - Checkout code\n   - Validate markdown files for syntax and broken links\n   \n2. Security Scan Stage (Parallel):\n   - SAST scanning using SonarQube for markdown\n   - Secret scanning using GitGuardian\n   - Software composition analysis (SCA) for any embedded code blocks\n\n3. Container Stage:\n   - Create minimal Nginx-based Docker image to serve markdown as static HTML\n   - Build steps:\n     ```\n     - Convert markdown to HTML\n     - Use multi-stage build with Node.js for conversion and Nginx for serving\n     ```\n   - Cache Docker layers\n   - Scan container image using Trivy\n   - Tag image with commit SHA and latest\n\n4. Registry Stage:\n   - Authenticate with AWS ECR\n   - Push container image with both tags\n   - Clean up local images\n\n5. Deployment Stage:\n   - Update ECS task definition with new image\n   - Deploy to ECS Fargate:\n     ```\n     - Blue/Green deployment strategy\n     - Health check on nginx endpoint\n     - 2 tasks minimum for high availability\n     ```\n   - Monitor deployment status\n   - Rollback on failure\n\nPipeline Configurations:\n- Triggers: On push to main branch\n- Caching:\n  - Docker layer caching\n  - AWS credentials caching\n- Artifacts:\n  - Store HTML conversion outputs\n  - Store security scan reports\n- Environment Variables:\n  - AWS_REGION\n  - ECR_REPOSITORY\n  - ECS_CLUSTER\n  - ECS_SERVICE\n\nRecommended CI Platform: GitHub Actions or AWS CodePipeline"
       }
     },
     {
       "step": "security_compliance",
       "result": {
         "status": "error",
-        "message": "An error occurred (dependencyFailedException) when calling the InvokeAgent operation: The server encountered an error processing the Lambda response. Check the Lambda response and retry the request"
+        "message": "An error occurred (dependencyFailedException) when calling the InvokeAgent operation: Received failed response from API execution. Retry the request later.",
+        "error_type": "EventStreamError"
       }
     },
     {
       "step": "yaml_generator",
       "result": {
         "status": "success",
-        "completion": "I notice that you haven't provided the actual pipeline design requirements. Could you please provide:\n\n1. The specific stages/steps you want in the pipeline\n2. Any AWS services being used\n3. Any build/test requirements\n4. Deployment targets or environments\n5. Any specific triggers for the workflow\n\nThis will help me generate an accurate and useful GitHub Actions workflow that meets your needs."
+        "completion": "I notice that you haven't provided the pipeline design details. Could you please share the specific pipeline stages and requirements you'd like to implement in the GitHub Actions workflow? This should include:\n\n1. What are the main stages/steps needed?\n2. What AWS services are you interacting with?\n3. Any specific build, test, or deployment requirements?\n4. Target environment details (dev/staging/prod)\n\nThis information will help me generate an accurate and useful workflow that meets your needs."
       }
     },
     {
       "step": "pr_manager",
       "result": {
         "status": "success",
-        "completion": "I cannot create the PR yet as the pipeline requirements are not specified. Please provide:\n\n1. Which stages you want in the pipeline (e.g., build, test, lint, deploy)\n2. Details of any AWS services being used\n3. Build and test requirements (language, framework, test commands)\n4. Deployment targets/environments (dev, staging, prod)\n5. Workflow triggers (push, pull_request, manual, scheduled)\n\nOnce you provide these details, I can generate an appropriate workflow YAML and create a PR with comprehensive documentation."
+        "completion": "I notice that you haven't provided the actual workflow YAML content that needs to be included in the PR. Additionally, while you've shared the repository URL, I need the specific pipeline requirements and workflow content to create a meaningful PR. \n\nCould you please provide:\n1. The complete workflow YAML content that should be added to .github/workflows/ci-cd.yml\n2. The specific branch name you'd like to create for this PR\n3. Any specific labels that should be added to the PR\n\nOnce you provide these details, I can create a draft PR with a comprehensive description including all the pipeline stages, required secrets, and deployment instructions."
       }
     }
   ]

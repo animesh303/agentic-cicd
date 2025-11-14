@@ -7,11 +7,25 @@ import json
 import boto3
 import os
 from datetime import datetime
+from botocore.config import Config
 
 # Initialize clients - AWS_REGION is automatically set by Lambda runtime
 # Use explicit region to ensure consistency with Bedrock agents
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-bedrock_agent_runtime = boto3.client("bedrock-agent-runtime", region_name=AWS_REGION)
+
+# Configure boto3 client with explicit timeouts to prevent hanging connections
+# read_timeout: Maximum time to wait for response data (120 seconds)
+# connect_timeout: Maximum time to establish connection (10 seconds)
+# max_retries: Number of retry attempts for transient failures
+BEDROCK_CONFIG = Config(
+    read_timeout=120,  # 2 minutes for reading streaming response
+    connect_timeout=10,  # 10 seconds to establish connection
+    retries={"max_attempts": 3, "mode": "standard"},
+)
+
+bedrock_agent_runtime = boto3.client(
+    "bedrock-agent-runtime", region_name=AWS_REGION, config=BEDROCK_CONFIG
+)
 lambda_client = boto3.client("lambda", region_name=AWS_REGION)
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 
@@ -63,8 +77,9 @@ def update_task_status(task_id, status, result=None):
 
 
 def invoke_agent(agent_id, agent_alias_id, session_id, input_text):
-    """Invoke a Bedrock agent"""
+    """Invoke a Bedrock agent with timeout handling"""
     try:
+        print(f"Invoking agent {agent_id} with session {session_id}")
         response = bedrock_agent_runtime.invoke_agent(
             agentId=agent_id,
             agentAliasId=agent_alias_id,
@@ -74,16 +89,35 @@ def invoke_agent(agent_id, agent_alias_id, session_id, input_text):
 
         # Read streaming response
         completion = ""
+        chunk_count = 0
         for event in response["completion"]:
             if "chunk" in event:
                 chunk = event["chunk"]
                 if "bytes" in chunk:
                     completion += chunk["bytes"].decode("utf-8")
+                    chunk_count += 1
+            elif "trace" in event:
+                # Log trace information for debugging
+                trace = event["trace"]
+                if "tracePart" in trace:
+                    trace_part = trace["tracePart"]
+                    if "agent" in trace_part:
+                        print(
+                            f"Agent trace: {trace_part.get('agent', {}).get('action', 'unknown')}"
+                        )
 
+        print(
+            f"Agent {agent_id} completed with {chunk_count} chunks, response length: {len(completion)}"
+        )
         return {"status": "success", "completion": completion}
     except Exception as e:
-        print(f"Error invoking agent {agent_id}: {str(e)}")
-        return {"status": "error", "message": str(e)}
+        error_msg = str(e)
+        error_type = type(e).__name__
+        print(f"Error invoking agent {agent_id} (type: {error_type}): {error_msg}")
+        import traceback
+
+        print(f"Traceback: {traceback.format_exc()}")
+        return {"status": "error", "message": error_msg, "error_type": error_type}
 
 
 def invoke_lambda(function_name, payload):
