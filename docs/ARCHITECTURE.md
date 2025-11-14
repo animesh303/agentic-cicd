@@ -1,8 +1,14 @@
 # Multi-Agent Architecture Implementation
 
+## Architecture Diagram
+
+![Architecture Diagram](./architecture_diagram.png)
+
+The architecture diagram above illustrates the complete system architecture, showing the flow from user invocation through the orchestrator, agents, Lambda functions, and AWS services.
+
 ## Overview
 
-This implementation provides a complete multi-agent architecture for automated CI/CD pipeline generation using Amazon Bedrock Agents. The system consists of 6 specialized agents, 5 Lambda functions, and an orchestrator to coordinate the workflow.
+This implementation provides a complete multi-agent architecture for automated CI/CD pipeline generation using Amazon Bedrock Agents. The system consists of 6 specialized agents, 6 Lambda functions, and an orchestrator to coordinate the workflow.
 
 ## Architecture Components
 
@@ -103,27 +109,61 @@ This implementation provides a complete multi-agent architecture for automated C
 
 ## Workflow
 
+The workflow follows a sequential orchestration pattern as shown in the architecture diagram. Each step builds upon the previous step's output:
+
 ```
-1. User invokes Orchestrator Lambda
+1. User/External System invokes Orchestrator Lambda
+   - Input: repo_url, branch, agent_ids
+   - Orchestrator creates task record in DynamoDB
    ↓
 2. Orchestrator invokes Repo Scanner Agent
+   - Agent analyzes repository requirements
    ↓
-3. Repo Scanner Agent calls Repository Ingestor Lambda
+3. Repo Scanner Agent calls Repository Ingestor Lambda (via Action Group)
+   - Lambda clones GitHub repository
+   - Extracts manifest files (Dockerfiles, package.json, etc.)
+   - Returns structured JSON with repository contents
    ↓
-4. Orchestrator invokes Static Analyzer Lambda (direct)
+4. Orchestrator invokes Static Analyzer Lambda (direct invocation)
+   - Analyzes Dockerfiles, dependencies, test frameworks
+   - Returns security and dependency analysis
    ↓
 5. Orchestrator invokes Pipeline Designer Agent
+   - Agent receives repository analysis and static analysis results
+   - Designs CI/CD pipeline stages (build, test, scan, deploy)
    ↓
 6. Orchestrator invokes Security & Compliance Agent
+   - Agent reviews pipeline design for security best practices
+   - Security Agent calls Static Analyzer Lambda (via Action Group) if needed
+   - Ensures SAST/SCA scanning, secrets management, least privilege
    ↓
 7. Orchestrator invokes YAML Generator Agent
+   - Agent converts pipeline design to GitHub Actions YAML
    ↓
-8. YAML Generator Agent calls Template Validator Lambda
+8. YAML Generator Agent calls Template Validator Lambda (via Action Group)
+   - Validates YAML syntax
+   - Checks for security issues (hardcoded secrets, etc.)
+   - Validates IAM permissions
    ↓
 9. Orchestrator invokes PR Manager Agent
+   - Agent prepares PR description and files
    ↓
-10. PR Manager Agent creates GitHub PR via API
+10. PR Manager Agent calls GitHub API Lambda (via Action Group)
+    - Lambda retrieves GitHub PAT from Secrets Manager
+    - Creates branch, commits workflow files
+    - Creates draft PR with comprehensive description
+    ↓
+11. Orchestrator updates DynamoDB with completion status
+    - All workflow steps and results stored
 ```
+
+### Data Flow
+
+- **Task State**: Orchestrator tracks workflow progress in DynamoDB
+- **Repository Data**: Repo Ingestor clones from GitHub, extracts manifests
+- **OpenAPI Specs**: Lambda functions read OpenAPI schemas from S3 for Bedrock action groups
+- **Secrets**: GitHub API Lambda retrieves GitHub PAT from Secrets Manager
+- **Monitoring**: All Lambda functions send metrics and logs to CloudWatch
 
 ## Infrastructure Components
 

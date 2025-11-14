@@ -101,70 +101,242 @@ resource "aws_iam_role_policy_attachment" "lambda_extra_attach" {
   policy_arn = aws_iam_policy.lambda_extra_policy.arn
 }
 
-# Lambda function zip files
-data "archive_file" "lambda_zip" {
-  type        = "zip"
-  source_dir  = "./lambda"
-  output_path = "./build/lambda_functions.zip"
-  excludes    = ["__pycache__", "*.pyc", ".git"]
+# Build Lambda package with dependencies
+resource "null_resource" "lambda_build" {
+  triggers = {
+    # Trigger rebuild when Lambda code or requirements change
+    lambda_code_hash = sha256(join("", [
+      for f in fileset("${path.module}/lambda", "*.py") : filesha256("${path.module}/lambda/${f}")
+    ]))
+    requirements_hash = filesha256("${path.module}/lambda/requirements.txt")
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
+      BUILD_DIR="${path.module}/build/lambda_package"
+      LAMBDA_DIR="${path.module}/lambda"
+      ZIP_FILE="${path.module}/build/lambda_functions.zip"
+      BUILD_PARENT="${path.module}/build"
+      
+      # Ensure build directory exists
+      mkdir -p "$BUILD_PARENT"
+      mkdir -p "$BUILD_DIR"
+      
+      # Remove existing zip file if it exists
+      rm -f "$ZIP_FILE"
+      
+      # Clean build directory
+      rm -rf "$BUILD_DIR"/*
+      mkdir -p "$BUILD_DIR"
+      
+      # Copy Lambda function files
+      if ls "$LAMBDA_DIR"/*.py 1> /dev/null 2>&1; then
+        cp "$LAMBDA_DIR"/*.py "$BUILD_DIR/"
+      else
+        echo "Warning: No Python files found in $LAMBDA_DIR"
+        exit 1
+      fi
+      
+      # Install dependencies for Linux (Lambda runtime)
+      # Use --platform to ensure Linux-compatible packages are installed
+      if [ -f "$LAMBDA_DIR/requirements.txt" ]; then
+        echo "Installing dependencies from requirements.txt for Linux platform..."
+        # Install with Linux platform target (manylinux2014_x86_64 for Python 3.11)
+        pip install -r "$LAMBDA_DIR/requirements.txt" \
+          -t "$BUILD_DIR" \
+          --platform manylinux2014_x86_64 \
+          --implementation cp \
+          --python-version 3.11 \
+          --only-binary=:all: \
+          --upgrade \
+          --quiet \
+          --disable-pip-version-check || {
+          echo "Warning: Platform-specific install failed, trying without platform flag..."
+          # Fallback: install without platform flag (works for pure Python packages)
+          pip install -r "$LAMBDA_DIR/requirements.txt" -t "$BUILD_DIR" --upgrade --quiet --disable-pip-version-check
+        }
+        echo "Dependencies installed. Verifying requests module..."
+        if [ -d "$BUILD_DIR/requests" ] || [ -f "$BUILD_DIR/requests.py" ]; then
+          echo "✓ requests module found"
+        else
+          echo "⚠ Warning: requests module not found in build directory"
+          ls -la "$BUILD_DIR" | head -20
+        fi
+      else
+        echo "Warning: requirements.txt not found"
+      fi
+      
+      # Ensure zip file's parent directory exists
+      ZIP_DIR=$(dirname "$ZIP_FILE")
+      mkdir -p "$ZIP_DIR"
+      
+      # Create zip file using Python (more reliable than shell zip command)
+      python3 <<PYTHON_SCRIPT
+import os
+import zipfile
+import sys
+
+build_dir = "$BUILD_DIR"
+zip_file = "$ZIP_FILE"
+
+if not os.path.exists(build_dir):
+    print(f"Error: Build directory does not exist: {build_dir}")
+    sys.exit(1)
+
+# List what we're about to package
+print("Packaging contents:")
+python_files = [f for f in os.listdir(build_dir) if f.endswith('.py')]
+print(f"  Python files: {len(python_files)}")
+for f in python_files[:5]:  # Show first 5
+    print(f"    - {f}")
+
+# Check for key packages
+key_packages = ['requests', 'yaml', 'boto3']
+for pkg in key_packages:
+    pkg_path = os.path.join(build_dir, pkg)
+    if os.path.exists(pkg_path):
+        print(f"  ✓ Found package: {pkg}")
+    else:
+        # Check if it's a .py file
+        pkg_file = os.path.join(build_dir, f"{pkg}.py")
+        if os.path.exists(pkg_file):
+            print(f"  ✓ Found module: {pkg}.py")
+        else:
+            print(f"  ⚠ Warning: {pkg} not found")
+
+try:
+    file_count = 0
+    with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, dirs, files in os.walk(build_dir):
+            # Skip __pycache__ directories
+            dirs[:] = [d for d in dirs if d != '__pycache__']
+            for file in files:
+                # Skip .pyc files
+                if file.endswith('.pyc'):
+                    continue
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, build_dir)
+                zipf.write(file_path, arcname)
+                file_count += 1
+    
+    print(f"Successfully created zip file: {zip_file}")
+    print(f"Total files packaged: {file_count}")
+    
+    # Verify zip contents
+    with zipfile.ZipFile(zip_file, 'r') as zipf:
+        zip_contents = zipf.namelist()
+        print(f"Zip file contains {len(zip_contents)} files")
+        # Check for requests
+        requests_files = [f for f in zip_contents if 'requests' in f]
+        if requests_files:
+            print(f"  ✓ Found {len(requests_files)} requests-related files")
+        else:
+            print("  ⚠ Warning: No requests files found in zip")
+            
+except Exception as e:
+    print(f"Error creating zip file: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+PYTHON_SCRIPT
+      
+      if [ $? -ne 0 ]; then
+        echo "Error: Failed to create zip file using Python"
+        exit 1
+      fi
+      
+      # Verify zip file was created
+      if [ ! -f "$ZIP_FILE" ]; then
+        echo "Error: Failed to create zip file at $ZIP_FILE"
+        echo "Build directory contents:"
+        ls -la "$BUILD_DIR" || true
+        exit 1
+      fi
+      
+      echo "Lambda package created: $ZIP_FILE"
+      echo "Package size: $(du -h "$ZIP_FILE" | cut -f1)"
+      
+      # Clean up build directory (optional, keep for debugging)
+      # rm -rf "$BUILD_DIR"
+    EOT
+  }
 }
+
+# Note: source_code_hash uses filebase64sha256 which reads the file after null_resource creates it
 
 # Repository Scanner Lambda (original)
 resource "aws_lambda_function" "repo_scanner" {
-  filename         = data.archive_file.lambda_zip.output_path
+  filename         = "${path.module}/build/lambda_functions.zip"
   function_name    = "${var.project_prefix}-repo-scanner"
   role             = aws_iam_role.lambda_exec.arn
   handler          = "repo_scanner.lambda_handler"
   runtime          = var.lambda_runtime
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  source_code_hash = filebase64sha256("${path.module}/build/lambda_functions.zip")
   timeout          = 900
-  depends_on       = [aws_iam_role_policy_attachment.lambda_basic_exec, aws_iam_role_policy_attachment.lambda_extra_attach]
+  depends_on = [
+    null_resource.lambda_build,
+    aws_iam_role_policy_attachment.lambda_basic_exec,
+    aws_iam_role_policy_attachment.lambda_extra_attach
+  ]
 }
 
 # Repository Ingestor Lambda
 resource "aws_lambda_function" "repo_ingestor" {
-  filename         = data.archive_file.lambda_zip.output_path
+  filename         = "${path.module}/build/lambda_functions.zip"
   function_name    = "${var.project_prefix}-repo-ingestor"
   role             = aws_iam_role.lambda_exec.arn
   handler          = "repo_ingestor.lambda_handler"
   runtime          = var.lambda_runtime
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  source_code_hash = filebase64sha256("${path.module}/build/lambda_functions.zip")
   timeout          = 900
-  depends_on       = [aws_iam_role_policy_attachment.lambda_basic_exec, aws_iam_role_policy_attachment.lambda_extra_attach]
+  depends_on = [
+    null_resource.lambda_build,
+    aws_iam_role_policy_attachment.lambda_basic_exec,
+    aws_iam_role_policy_attachment.lambda_extra_attach
+  ]
 }
 
 # Static Analyzer Lambda
 resource "aws_lambda_function" "static_analyzer" {
-  filename         = data.archive_file.lambda_zip.output_path
+  filename         = "${path.module}/build/lambda_functions.zip"
   function_name    = "${var.project_prefix}-static-analyzer"
   role             = aws_iam_role.lambda_exec.arn
   handler          = "static_analyzer.lambda_handler"
   runtime          = var.lambda_runtime
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  source_code_hash = filebase64sha256("${path.module}/build/lambda_functions.zip")
   timeout          = 900
-  depends_on       = [aws_iam_role_policy_attachment.lambda_basic_exec, aws_iam_role_policy_attachment.lambda_extra_attach]
+  depends_on = [
+    null_resource.lambda_build,
+    aws_iam_role_policy_attachment.lambda_basic_exec,
+    aws_iam_role_policy_attachment.lambda_extra_attach
+  ]
 }
 
 # Template Validator Lambda
 resource "aws_lambda_function" "template_validator" {
-  filename         = data.archive_file.lambda_zip.output_path
+  filename         = "${path.module}/build/lambda_functions.zip"
   function_name    = "${var.project_prefix}-template-validator"
   role             = aws_iam_role.lambda_exec.arn
   handler          = "template_validator.lambda_handler"
   runtime          = var.lambda_runtime
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  source_code_hash = filebase64sha256("${path.module}/build/lambda_functions.zip")
   timeout          = 300
-  depends_on       = [aws_iam_role_policy_attachment.lambda_basic_exec, aws_iam_role_policy_attachment.lambda_extra_attach]
+  depends_on = [
+    null_resource.lambda_build,
+    aws_iam_role_policy_attachment.lambda_basic_exec,
+    aws_iam_role_policy_attachment.lambda_extra_attach
+  ]
 }
 
 # Orchestrator Lambda
 resource "aws_lambda_function" "orchestrator" {
-  filename         = data.archive_file.lambda_zip.output_path
+  filename         = "${path.module}/build/lambda_functions.zip"
   function_name    = "${var.project_prefix}-orchestrator"
   role             = aws_iam_role.lambda_exec.arn
   handler          = "orchestrator.lambda_handler"
   runtime          = var.lambda_runtime
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  source_code_hash = filebase64sha256("${path.module}/build/lambda_functions.zip")
   timeout          = 900
   environment {
     variables = {
@@ -173,24 +345,32 @@ resource "aws_lambda_function" "orchestrator" {
       STATIC_ANALYZER_FUNCTION_NAME = aws_lambda_function.static_analyzer.function_name
     }
   }
-  depends_on = [aws_iam_role_policy_attachment.lambda_basic_exec, aws_iam_role_policy_attachment.lambda_extra_attach]
+  depends_on = [
+    null_resource.lambda_build,
+    aws_iam_role_policy_attachment.lambda_basic_exec,
+    aws_iam_role_policy_attachment.lambda_extra_attach
+  ]
 }
 
 # GitHub API Lambda
 resource "aws_lambda_function" "github_api" {
-  filename         = data.archive_file.lambda_zip.output_path
+  filename         = "${path.module}/build/lambda_functions.zip"
   function_name    = "${var.project_prefix}-github-api"
   role             = aws_iam_role.lambda_exec.arn
   handler          = "github_api.lambda_handler"
   runtime          = var.lambda_runtime
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  source_code_hash = filebase64sha256("${path.module}/build/lambda_functions.zip")
   timeout          = 300
   environment {
     variables = {
       GITHUB_PAT_SECRET_NAME = aws_secretsmanager_secret.github_pat.name
     }
   }
-  depends_on = [aws_iam_role_policy_attachment.lambda_basic_exec, aws_iam_role_policy_attachment.lambda_extra_attach]
+  depends_on = [
+    null_resource.lambda_build,
+    aws_iam_role_policy_attachment.lambda_basic_exec,
+    aws_iam_role_policy_attachment.lambda_extra_attach
+  ]
 }
 
 # Secrets Manager for GitHub PAT
@@ -608,6 +788,21 @@ resource "aws_cloudwatch_log_group" "github_api" {
 
 resource "aws_cloudwatch_log_group" "static_analyzer" {
   name              = "/aws/lambda/${aws_lambda_function.static_analyzer.function_name}"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "repo_scanner" {
+  name              = "/aws/lambda/${aws_lambda_function.repo_scanner.function_name}"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "repo_ingestor" {
+  name              = "/aws/lambda/${aws_lambda_function.repo_ingestor.function_name}"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "template_validator" {
+  name              = "/aws/lambda/${aws_lambda_function.template_validator.function_name}"
   retention_in_days = 14
 }
 
