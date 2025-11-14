@@ -1,0 +1,39 @@
+
+==========================================
+Prerequisites Check
+==========================================
+[0;32m✓[0m AWS CLI installed
+[0;32m✓[0m AWS credentials configured (Account: 027378719919)
+[0;32m✓[0m Terraform installed (version: 1.9.8)
+[0;32m✓[0m Terraform outputs available
+[0;32m✓[0m jq installed (for JSON processing)
+
+==========================================
+Lambda Function Tests
+==========================================
+[0;34mℹ[0m Testing Repository Ingestor Lambda...
+[0;32m✓[0m Repository Ingestor Lambda responded successfully
+[0;34mℹ[0m Testing Static Analyzer Lambda...
+[0;32m✓[0m Static Analyzer Lambda responded successfully
+[0;34mℹ[0m Testing Template Validator Lambda...
+[0;32m✓[0m Template Validator Lambda responded successfully
+
+==========================================
+Bedrock Agent Tests
+==========================================
+[0;34mℹ[0m Testing Repo Scanner Agent...
+./scripts/e2e_test.sh: line 278: timeout: command not found
+[1;33m⚠[0m Repo Scanner Agent response file not created
+
+==========================================
+DynamoDB Tests
+==========================================
+[0;32m✓[0m DynamoDB table exists: bedrock-ci-agent-tasks
+[0;32m✓[0m DynamoDB write operation successful
+
+==========================================
+S3 Bucket Tests
+==========================================
+[0;32m✓[0m S3 bucket exists: bedrock-ci-agent-templates-12345
+[0;32m✓[0m OpenAPI specs found in S3
+[0;34mℹ[0m Skipping end-to-end workflow test
