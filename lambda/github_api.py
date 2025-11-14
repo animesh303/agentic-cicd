@@ -129,58 +129,248 @@ def create_pull_request(
 
 def lambda_handler(event, context):
     """
-    Event: {
+    Handle both direct invocation and Bedrock agent invocation formats.
+
+    Direct invocation:
+    {
         "operation": "create_pr" | "create_file" | "create_branch",
         "owner": "repo-owner",
         "repo": "repo-name",
-        "branch": "branch-name",
-        "base_branch": "main",
         "title": "PR title",
-        "body": "PR description",
         "head": "feature-branch",
-        "base": "main",
-        "draft": true/false,
-        "files": [
-            {
-                "path": ".github/workflows/ci-cd.yml",
-                "content": "workflow yaml content",
-                "message": "Add CI/CD pipeline"
+        ...
+    }
+
+    Bedrock agent invocation:
+    {
+        "messageVersion": "1.0",
+        "actionGroup": "...",
+        "apiPath": "/create-pr",
+        "httpMethod": "POST",
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "properties": [
+                        {"name": "operation", "value": "create_pr"},
+                        {"name": "owner", "value": "..."},
+                        ...
+                    ]
+                }
             }
-        ]
+        }
     }
     """
-    operation = event.get("operation")
+    # Initialize variables for Bedrock format
+    action_group = None
+    api_path = None
+    http_method = None
+
+    # Handle Bedrock agent invocation format
+    if "messageVersion" in event and "actionGroup" in event:
+        # Extract parameters from requestBody.properties array
+        request_body = event.get("requestBody", {})
+        content = request_body.get("content", {})
+        json_content = content.get("application/json", {})
+        properties = json_content.get("properties", [])
+
+        # Convert properties array to dict
+        body_data = {}
+        for prop in properties:
+            name = prop.get("name")
+            value = prop.get("value")
+            if name and value is not None:
+                body_data[name] = value
+
+        # Extract all fields from body_data
+        operation = body_data.get("operation")
+        owner = body_data.get("owner")
+        repo = body_data.get("repo")
+        branch = body_data.get("branch")
+        base_branch = body_data.get("base_branch", "main")
+        title = body_data.get("title")
+        body = body_data.get("body", "")
+        head = body_data.get("head")
+        base = body_data.get("base", "main")
+        draft = body_data.get("draft", True)
+        files = body_data.get("files", [])
+
+        # Handle files if it's a string (JSON string)
+        if isinstance(files, str):
+            try:
+                files = json.loads(files)
+            except:
+                files = []
+
+        action_group = event.get("actionGroup", "unknown")
+        api_path = event.get("apiPath", "/create-pr")
+        http_method = event.get("httpMethod", "POST")
+    elif "actionGroupInvocationInput" in event:
+        # Alternative Bedrock format
+        action_input = event["actionGroupInvocationInput"]
+        request_body = (
+            action_input.get("requestBody", {})
+            .get("content", {})
+            .get("application/json", {})
+        )
+        body_str = request_body.get("body", "{}")
+
+        try:
+            body_data = json.loads(body_str) if isinstance(body_str, str) else body_str
+            operation = body_data.get("operation")
+            owner = body_data.get("owner")
+            repo = body_data.get("repo")
+            branch = body_data.get("branch")
+            base_branch = body_data.get("base_branch", "main")
+            title = body_data.get("title")
+            body = body_data.get("body", "")
+            head = body_data.get("head")
+            base = body_data.get("base", "main")
+            draft = body_data.get("draft", True)
+            files = body_data.get("files", [])
+        except Exception as e:
+            error_response = {
+                "messageVersion": "1.0",
+                "response": {
+                    "actionGroup": action_input.get("actionGroupName", "unknown"),
+                    "apiPath": action_input.get("apiPath", "/create-pr"),
+                    "httpMethod": action_input.get("httpMethod", "POST"),
+                    "httpStatusCode": 400,
+                    "responseBody": {
+                        "application/json": {
+                            "body": json.dumps(
+                                {
+                                    "status": "error",
+                                    "message": f"Invalid request body: {str(e)}",
+                                }
+                            )
+                        },
+                    },
+                },
+            }
+            return error_response
+
+        action_group = action_input.get("actionGroupName", "unknown")
+        api_path = action_input.get("apiPath", "/create-pr")
+        http_method = action_input.get("httpMethod", "POST")
+    else:
+        # Handle direct invocation format
+        operation = event.get("operation")
+        owner = event.get("owner")
+        repo = event.get("repo")
+        branch = event.get("branch")
+        base_branch = event.get("base_branch", "main")
+        title = event.get("title")
+        body = event.get("body", "")
+        head = event.get("head")
+        base = event.get("base", "main")
+        draft = event.get("draft", True)
+        files = event.get("files", [])
 
     if not operation:
-        return {
+        error_response = {
             "status": "error",
             "message": "operation is required (create_pr, create_file, create_branch)",
         }
+        # Return in Bedrock format if invoked by agent
+        if action_group:
+            return {
+                "messageVersion": "1.0",
+                "response": {
+                    "actionGroup": action_group,
+                    "apiPath": api_path or "/create-pr",
+                    "httpMethod": http_method or "POST",
+                    "httpStatusCode": 400,
+                    "responseBody": {
+                        "application/json": {"body": json.dumps(error_response)}
+                    },
+                },
+            }
+        return error_response
 
     try:
         token = get_github_token()
-        owner = event.get("owner")
-        repo = event.get("repo")
 
         if not owner or not repo:
-            return {"status": "error", "message": "owner and repo are required"}
+            error_response = {
+                "status": "error",
+                "message": "owner and repo are required",
+            }
+            # Return in Bedrock format if invoked by agent
+            if action_group:
+                return {
+                    "messageVersion": "1.0",
+                    "response": {
+                        "actionGroup": action_group,
+                        "apiPath": api_path or "/create-pr",
+                        "httpMethod": http_method or "POST",
+                        "httpStatusCode": 400,
+                        "responseBody": {
+                            "application/json": {"body": json.dumps(error_response)}
+                        },
+                    },
+                }
+            return error_response
 
         if operation == "create_branch":
-            branch = event.get("branch")
-            base_branch = event.get("base_branch", "main")
-
             if not branch:
-                return {"status": "error", "message": "branch is required"}
+                error_response = {"status": "error", "message": "branch is required"}
+                if action_group:
+                    return {
+                        "messageVersion": "1.0",
+                        "response": {
+                            "actionGroup": action_group,
+                            "apiPath": api_path or "/create-pr",
+                            "httpMethod": http_method or "POST",
+                            "httpStatusCode": 400,
+                            "responseBody": {
+                                "application/json": {"body": json.dumps(error_response)}
+                            },
+                        },
+                    }
+                return error_response
 
-            success = create_branch(owner, repo, base_branch, branch, token)
-            return {"status": "success" if success else "error", "branch": branch}
+            success = create_branch(owner, repo, base_branch or "main", branch, token)
+            result = {"status": "success" if success else "error", "branch": branch}
+
+            # Return in Bedrock format if invoked by agent
+            if action_group:
+                return {
+                    "messageVersion": "1.0",
+                    "response": {
+                        "actionGroup": action_group,
+                        "apiPath": api_path or "/create-pr",
+                        "httpMethod": http_method or "POST",
+                        "httpStatusCode": 200 if success else 500,
+                        "responseBody": {
+                            "application/json": {"body": json.dumps(result)}
+                        },
+                    },
+                }
+            return result
 
         elif operation == "create_file":
-            files = event.get("files", [])
-            branch = event.get("branch", "main")
-
             if not files:
-                return {"status": "error", "message": "files array is required"}
+                error_response = {
+                    "status": "error",
+                    "message": "files array is required",
+                }
+                if action_group:
+                    return {
+                        "messageVersion": "1.0",
+                        "response": {
+                            "actionGroup": action_group,
+                            "apiPath": api_path or "/create-pr",
+                            "httpMethod": http_method or "POST",
+                            "httpStatusCode": 400,
+                            "responseBody": {
+                                "application/json": {"body": json.dumps(error_response)}
+                            },
+                        },
+                    }
+                return error_response
+
+            if not branch:
+                branch = "main"
 
             results = []
             for file_info in files:
@@ -205,20 +395,46 @@ def lambda_handler(event, context):
                     {"path": path, "status": "success" if success else "error"}
                 )
 
-            return {"status": "success", "files": results}
+            result = {"status": "success", "files": results}
+
+            # Return in Bedrock format if invoked by agent
+            if action_group:
+                return {
+                    "messageVersion": "1.0",
+                    "response": {
+                        "actionGroup": action_group,
+                        "apiPath": api_path or "/create-pr",
+                        "httpMethod": http_method or "POST",
+                        "httpStatusCode": 200,
+                        "responseBody": {
+                            "application/json": {"body": json.dumps(result)}
+                        },
+                    },
+                }
+            return result
 
         elif operation == "create_pr":
-            title = event.get("title")
-            body = event.get("body", "")
-            head = event.get("head")
-            base = event.get("base", "main")
-            draft = event.get("draft", True)  # Default to draft for human-in-the-loop
-
             if not title or not head:
-                return {"status": "error", "message": "title and head are required"}
+                error_response = {
+                    "status": "error",
+                    "message": "title and head are required",
+                }
+                if action_group:
+                    return {
+                        "messageVersion": "1.0",
+                        "response": {
+                            "actionGroup": action_group,
+                            "apiPath": api_path or "/create-pr",
+                            "httpMethod": http_method or "POST",
+                            "httpStatusCode": 400,
+                            "responseBody": {
+                                "application/json": {"body": json.dumps(error_response)}
+                            },
+                        },
+                    }
+                return error_response
 
             # Create files first if provided
-            files = event.get("files", [])
             branch = head
 
             if files:
@@ -239,7 +455,7 @@ def lambda_handler(event, context):
             # Create PR
             pr = create_pull_request(owner, repo, title, body, head, base, draft, token)
 
-            return {
+            result = {
                 "status": "success",
                 "pr_number": pr.get("number"),
                 "pr_url": pr.get("html_url"),
@@ -253,8 +469,55 @@ def lambda_handler(event, context):
                 },
             }
 
+            # Return in Bedrock format if invoked by agent
+            if action_group:
+                return {
+                    "messageVersion": "1.0",
+                    "response": {
+                        "actionGroup": action_group,
+                        "apiPath": api_path or "/create-pr",
+                        "httpMethod": http_method or "POST",
+                        "httpStatusCode": 200,
+                        "responseBody": {
+                            "application/json": {"body": json.dumps(result)}
+                        },
+                    },
+                }
+            return result
+
         else:
-            return {"status": "error", "message": f"Unknown operation: {operation}"}
+            error_response = {
+                "status": "error",
+                "message": f"Unknown operation: {operation}",
+            }
+            if action_group:
+                return {
+                    "messageVersion": "1.0",
+                    "response": {
+                        "actionGroup": action_group,
+                        "apiPath": api_path or "/create-pr",
+                        "httpMethod": http_method or "POST",
+                        "httpStatusCode": 400,
+                        "responseBody": {
+                            "application/json": {"body": json.dumps(error_response)}
+                        },
+                    },
+                }
+            return error_response
 
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        error_response = {"status": "error", "message": str(e)}
+        if action_group:
+            return {
+                "messageVersion": "1.0",
+                "response": {
+                    "actionGroup": action_group,
+                    "apiPath": api_path or "/create-pr",
+                    "httpMethod": http_method or "POST",
+                    "httpStatusCode": 500,
+                    "responseBody": {
+                        "application/json": {"body": json.dumps(error_response)}
+                    },
+                },
+            }
+        return error_response

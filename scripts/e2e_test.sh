@@ -76,7 +76,7 @@ init_test_results() {
     "prerequisites": [],
     "component_tests": [],
     "integration_tests": [],
-    "end_to_end_test": {},
+    "end_to_end_test": [],
     "summary": {
       "total_tests": 0,
       "passed": 0,
@@ -283,15 +283,49 @@ run_with_timeout() {
     fi
 }
 
+# Check if invoke-agent command is available
+# Note: AWS CLI may not support invoke-agent command even in latest versions
+# The orchestrator uses boto3 which has full support for invoke_agent()
+check_invoke_agent_available() {
+    # Check bedrock-agent-runtime service
+    if aws bedrock-agent-runtime invoke-agent help &> /dev/null 2>&1; then
+        return 0
+    fi
+    # Check bedrock-agent service (alternative location)
+    if aws bedrock-agent invoke-agent help &> /dev/null 2>&1; then
+        return 0
+    fi
+    # Check if invoke-agent is in the list of available commands
+    if aws bedrock-agent-runtime help 2>&1 | grep -q "invoke-agent"; then
+        return 0
+    fi
+    if aws bedrock-agent help 2>&1 | grep -q "invoke-agent"; then
+        return 0
+    fi
+    return 1
+}
+
 # Test Bedrock Agents
 test_bedrock_agents() {
     log_section "Bedrock Agent Tests"
+    
+    # Check if invoke-agent command is available
+    # Note: AWS CLI may not have invoke-agent command even in latest versions
+    # This is a known limitation - the orchestrator uses boto3 which works correctly
+    if ! check_invoke_agent_available; then
+        log_warn "AWS CLI 'invoke-agent' command not available in this AWS CLI version"
+        log_info "This is expected - AWS CLI may not support invoke-agent yet"
+        log_info "Agents will be tested via orchestrator workflow (uses boto3 SDK)"
+        add_test_result "component_tests" "agent_repo_scanner" "skip" "invoke-agent command not available in AWS CLI" "{\"note\": \"AWS CLI limitation - agents tested via orchestrator workflow using boto3\"}"
+        return 0
+    fi
     
     # Get agent IDs from Terraform
     AGENT_IDS=$(terraform output -json agent_ids_map 2>/dev/null || echo "{}")
     
     if [ "$AGENT_IDS" = "{}" ]; then
         log_fail "Agent IDs not found in Terraform outputs"
+        add_test_result "component_tests" "agent_repo_scanner" "fail" "Agent IDs not found" "{}"
         return 1
     fi
     
@@ -301,23 +335,34 @@ test_bedrock_agents() {
         log_info "Testing Repo Scanner Agent..."
         SESSION_ID="e2e-test-repo-scanner-$(date +%s)"
         
+        # Try bedrock-agent-runtime invoke-agent
+        # Note: This command may not be available in AWS CLI - that's OK, agents are tested via orchestrator
         if run_with_timeout 60 aws bedrock-agent-runtime invoke-agent \
             --agent-id "$REPO_SCANNER_ID" \
             --agent-alias-id "TSTALIASID" \
             --session-id "$SESSION_ID" \
             --input-text "Analyze repository: $TEST_REPO_URL (branch: $TEST_BRANCH). Extract all manifest files, detect languages, frameworks, and infrastructure components." \
-            /tmp/repo_scanner_response.json 2>&1 | tee -a "$TEST_LOG_FILE"; then
+            /tmp/repo_scanner_response.json > /tmp/agent_output.log 2>&1; then
             
-            if [ -f /tmp/repo_scanner_response.json ]; then
+            # Check if response file was created and has content
+            if [ -f /tmp/repo_scanner_response.json ] && [ -s /tmp/repo_scanner_response.json ]; then
                 log_pass "Repo Scanner Agent responded"
                 add_test_result "component_tests" "agent_repo_scanner" "pass" "Agent responded successfully" "{\"session_id\": \"$SESSION_ID\"}"
             else
-                log_warn "Repo Scanner Agent response file not created"
-                add_test_result "component_tests" "agent_repo_scanner" "warn" "Response file not created" "{}"
+                log_warn "Repo Scanner Agent response file not created or empty"
+                add_test_result "component_tests" "agent_repo_scanner" "warn" "Response file not created or empty" "{}"
             fi
         else
-            log_warn "Repo Scanner Agent test timed out or failed (this may be normal for long-running agents)"
-            add_test_result "component_tests" "agent_repo_scanner" "warn" "Agent test timed out or failed" "{}"
+            # Check the error output
+            ERROR_OUTPUT=$(cat /tmp/agent_output.log 2>/dev/null || echo "")
+            if echo "$ERROR_OUTPUT" | grep -q "Invalid choice\|Invalid choice"; then
+                log_warn "AWS CLI version may not support invoke-agent command"
+                log_info "Update AWS CLI: pip install --upgrade awscli or brew upgrade awscli"
+                add_test_result "component_tests" "agent_repo_scanner" "warn" "AWS CLI version may not support invoke-agent" "{\"note\": \"Update AWS CLI to latest version\"}"
+            else
+                log_warn "Repo Scanner Agent test timed out or failed (this may be normal for long-running agents)"
+                add_test_result "component_tests" "agent_repo_scanner" "warn" "Agent test timed out or failed" "{}"
+            fi
         fi
     else
         log_fail "Repo Scanner Agent ID not found"

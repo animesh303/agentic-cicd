@@ -204,9 +204,15 @@ def lambda_handler(event, context):
             )
 
             if static_analyzer_result.get("status") != "success":
+                error_msg = static_analyzer_result.get("message", "Unknown error")
                 print(
-                    f"Warning: Static analyzer returned: {static_analyzer_result.get('status')}"
+                    f"Warning: Static analyzer returned status '{static_analyzer_result.get('status')}': {error_msg}"
                 )
+                print(f"Static analyzer result: {json.dumps(static_analyzer_result, indent=2)}")
+            else:
+                print(f"Static analyzer completed successfully")
+                print(f"Found {len(static_analyzer_result.get('dockerfile_analysis', []))} Dockerfiles")
+                print(f"Found {len(static_analyzer_result.get('dependency_analysis', []))} dependency manifests")
         else:
             print(
                 "Warning: STATIC_ANALYZER_FUNCTION_NAME not set, skipping static analysis"
@@ -229,13 +235,14 @@ def lambda_handler(event, context):
             pipeline_design = workflow_steps[-1].get("result", {}).get("completion", "")
             input_text = f"Review this pipeline design for security and compliance: {pipeline_design}. Ensure SAST/SCA scanning, secrets scanning, and least privilege IAM permissions."
 
-            # Include static analyzer results if available
+            # Include static analyzer results if available (even if status is not success, include what we have)
             analysis_context = ""
-            if (
-                static_analyzer_result
-                and static_analyzer_result.get("status") == "success"
-            ):
-                analysis_context = f"\n\nStatic Analysis Results:\n{json.dumps(static_analyzer_result, indent=2)}"
+            if static_analyzer_result:
+                if static_analyzer_result.get("status") == "success":
+                    analysis_context = f"\n\nStatic Analysis Results:\n{json.dumps(static_analyzer_result, indent=2)}"
+                else:
+                    # Include error information so agent knows static analysis failed
+                    analysis_context = f"\n\nNote: Static analysis encountered an issue: {static_analyzer_result.get('message', 'Unknown error')}. Please proceed with security review based on the pipeline design."
 
             result = invoke_agent(
                 agent_ids["security_compliance"],
@@ -244,6 +251,10 @@ def lambda_handler(event, context):
                 input_text + analysis_context,
             )
             workflow_steps.append({"step": "security_compliance", "result": result})
+            
+            if result.get("status") != "success":
+                print(f"Warning: Security & Compliance agent returned: {result.get('status')}")
+                print(f"Error message: {result.get('message', 'No error message')}")
 
         # Step 5: YAML Generator Agent
         if "yaml_generator" in agent_ids:

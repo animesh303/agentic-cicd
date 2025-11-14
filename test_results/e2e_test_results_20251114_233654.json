@@ -1,0 +1,123 @@
+{
+  "test_run": {
+    "timestamp": "20251114_233654",
+    "test_repo_url": "https://github.com/octocat/Hello-World",
+    "test_branch": "main",
+    "test_environment": {
+      "aws_account": "027378719919",
+      "aws_region": "us-east-1"
+    }
+  },
+  "test_results": {
+    "prerequisites": [
+      {
+        "test": "aws_cli_installed",
+        "status": "pass",
+        "message": "AWS CLI is installed",
+        "details": {},
+        "timestamp": "2025-11-14T18:06:56Z"
+      },
+      {
+        "test": "aws_credentials",
+        "status": "pass",
+        "message": "AWS credentials configured",
+        "details": {
+          "account": "027378719919"
+        },
+        "timestamp": "2025-11-14T18:06:58Z"
+      },
+      {
+        "test": "terraform_installed",
+        "status": "pass",
+        "message": "Terraform is installed",
+        "details": {
+          "version": "1.9.8"
+        },
+        "timestamp": "2025-11-14T18:06:58Z"
+      },
+      {
+        "test": "terraform_outputs",
+        "status": "pass",
+        "message": "Terraform outputs available",
+        "details": {},
+        "timestamp": "2025-11-14T18:07:03Z"
+      }
+    ],
+    "component_tests": [
+      {
+        "test": "lambda_repo_ingestor",
+        "status": "pass",
+        "message": "Lambda function responded",
+        "details": {
+          "response_size": 205
+        },
+        "timestamp": "2025-11-14T18:07:25Z"
+      },
+      {
+        "test": "lambda_static_analyzer",
+        "status": "pass",
+        "message": "Lambda function responded",
+        "details": {},
+        "timestamp": "2025-11-14T18:07:27Z"
+      },
+      {
+        "test": "lambda_template_validator",
+        "status": "pass",
+        "message": "Lambda function responded",
+        "details": {},
+        "timestamp": "2025-11-14T18:07:29Z"
+      },
+      {
+        "test": "agent_repo_scanner",
+        "status": "skip",
+        "message": "invoke-agent command not available in AWS CLI",
+        "details": {
+          "note": "Agents will be tested via orchestrator workflow"
+        },
+        "timestamp": "2025-11-14T18:07:29Z"
+      },
+      {
+        "test": "dynamodb_table",
+        "status": "pass",
+        "message": "Table exists",
+        "details": {
+          "table_name": "bedrock-ci-agent-tasks"
+        },
+        "timestamp": "2025-11-14T18:07:34Z"
+      },
+      {
+        "test": "dynamodb_write",
+        "status": "pass",
+        "message": "Write operation successful",
+        "details": {
+          "test_task_id": "e2e-test-1763143654"
+        },
+        "timestamp": "2025-11-14T18:07:35Z"
+      },
+      {
+        "test": "s3_bucket",
+        "status": "pass",
+        "message": "Bucket exists",
+        "details": {
+          "bucket_name": "bedrock-ci-agent-templates-12345"
+        },
+        "timestamp": "2025-11-14T18:07:40Z"
+      },
+      {
+        "test": "s3_openapi_specs",
+        "status": "pass",
+        "message": "OpenAPI specs found",
+        "details": {},
+        "timestamp": "2025-11-14T18:07:41Z"
+      }
+    ],
+    "integration_tests": [],
+    "end_to_end_test": {},
+    "summary": {
+      "total_tests": 0,
+      "passed": 0,
+      "failed": 0,
+      "warnings": 0
+    }
+  }
+}

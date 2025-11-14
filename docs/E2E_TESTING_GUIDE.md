@@ -25,6 +25,9 @@ The end-to-end test suite validates:
 - **jq** - JSON processor (recommended)
 - **Bash** - Version 4.0 or later
 
+**Important Note on Bedrock Agent Testing:**
+The AWS CLI may not support the `invoke-agent` command even in the latest versions. This is a known limitation of the AWS CLI. The test script will automatically detect this and skip the direct agent test. **This is expected behavior** - agents are still fully tested via the orchestrator workflow, which uses the boto3 Python SDK that has complete support for invoking Bedrock agents. The orchestrator test is the primary validation method and will test all agents end-to-end.
+
 ### Required Access
 
 - AWS account with appropriate permissions
