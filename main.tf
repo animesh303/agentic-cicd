@@ -96,12 +96,7 @@ resource "aws_iam_policy" "lambda_extra_policy" {
         Effect = "Allow",
         Action = ["lambda:InvokeFunction"],
         Resource = [
-          aws_lambda_function.repo_scanner.arn,
-          aws_lambda_function.repo_ingestor.arn,
-          aws_lambda_function.static_analyzer.arn,
-          aws_lambda_function.template_validator.arn,
-          aws_lambda_function.orchestrator.arn,
-          aws_lambda_function.github_api.arn
+          "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${var.project_prefix}-*"
         ]
       }
     ]
