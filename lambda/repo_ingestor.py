@@ -28,50 +28,128 @@ def download_repo_as_zip(repo_url, branch, tmpdir):
     """
     try:
         # Parse GitHub URL
+        original_url = repo_url
         if repo_url.startswith("https://"):
             repo_url = repo_url.replace("https://", "")
         elif repo_url.startswith("http://"):
             repo_url = repo_url.replace("http://", "")
-        
+
         if repo_url.startswith("github.com/"):
             repo_path = repo_url.replace("github.com/", "")
         elif "/" in repo_url:
             repo_path = repo_url
         else:
-            raise ValueError(f"Invalid repository URL format: {repo_url}")
-        
+            raise ValueError(f"Invalid repository URL format: {original_url}")
+
         # Remove .git suffix if present
         if repo_path.endswith(".git"):
             repo_path = repo_path[:-4]
-        
-        # Construct GitHub API URL for zip download
-        # Format: https://api.github.com/repos/{owner}/{repo}/zipball/{ref}
-        zip_url = f"https://api.github.com/repos/{repo_path}/zipball/{branch}"
-        
-        # Download the zip file
-        print(f"Downloading repository from: {zip_url}")
-        response = requests.get(zip_url, stream=True, timeout=60)
-        response.raise_for_status()
-        
+
+        # Split into owner and repo
+        parts = repo_path.split("/")
+        if len(parts) != 2:
+            raise ValueError(
+                f"Invalid repository path format: {repo_path}. Expected 'owner/repo'"
+            )
+
+        owner, repo = parts[0], parts[1]
+
+        # Use direct download URL (more reliable than API endpoint)
+        # Format: https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip
+        # This is the standard GitHub archive URL format
+        branches_to_try = [branch]
+
+        # Add fallback branches if not already in the list
+        if branch.lower() != "main":
+            branches_to_try.append("main")
+        if branch.lower() != "master":
+            branches_to_try.append("master")
+
+        response = None
+        zip_url = None
+
+        # Try each branch until one works
+        for try_branch in branches_to_try:
+            zip_url = (
+                f"https://github.com/{owner}/{repo}/archive/refs/heads/{try_branch}.zip"
+            )
+            print(f"Trying to download: {owner}/{repo} (branch: {try_branch})")
+            print(f"URL: {zip_url}")
+
+            response = requests.get(
+                zip_url, stream=True, timeout=60, allow_redirects=True
+            )
+
+            if response.status_code == 200:
+                print(f"✓ Successfully found branch: {try_branch}")
+                break
+            elif response.status_code == 404:
+                print(f"✗ Branch '{try_branch}' not found")
+                if try_branch != branches_to_try[-1]:  # Not the last one
+                    print("Trying next branch...")
+                continue
+            else:
+                # Some other error, break and handle below
+                break
+
+        # Check for errors and provide helpful messages
+        if response is None or response.status_code != 200:
+            if response is None:
+                error_msg = f"Failed to download repository {owner}/{repo}"
+            elif response.status_code == 404:
+                error_msg = (
+                    f"Repository {owner}/{repo} not found or none of the branches exist"
+                )
+                # Try to get more info from GitHub API
+                try:
+                    api_url = f"https://api.github.com/repos/{owner}/{repo}"
+                    api_response = requests.get(api_url, timeout=10)
+                    if api_response.status_code == 404:
+                        error_msg = f"Repository {owner}/{repo} not found. It may be private or not exist."
+                    elif api_response.status_code == 403:
+                        error_msg = f"Repository {owner}/{repo} may be private. Authentication required."
+                    elif api_response.status_code == 200:
+                        # Repo exists, so branches are wrong
+                        repo_data = api_response.json()
+                        default_branch = repo_data.get("default_branch", "main")
+                        error_msg = f"None of the tried branches exist. Repository exists with default branch: {default_branch}. Tried: {', '.join(branches_to_try)}"
+                except Exception as e:
+                    print(f"Could not get repository info: {e}")
+            else:
+                # Other HTTP error
+                try:
+                    response.raise_for_status()
+                except Exception as e:
+                    error_msg = f"HTTP error downloading repository: {str(e)}"
+
+            raise Exception(error_msg)
+
         # Save to temporary zip file
         zip_path = os.path.join(tmpdir, "repo.zip")
         with open(zip_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-        
+
         # Extract zip file
         extract_dir = os.path.join(tmpdir, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
-        
+
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(extract_dir)
-        
-        # Find the actual repo directory (GitHub adds owner-repo-hash prefix)
-        extracted_dirs = [d for d in os.listdir(extract_dir) if os.path.isdir(os.path.join(extract_dir, d))]
+
+        # Find the actual repo directory
+        # GitHub archive format: {repo}-{branch} or {repo}-{hash}
+        extracted_dirs = [
+            d
+            for d in os.listdir(extract_dir)
+            if os.path.isdir(os.path.join(extract_dir, d))
+        ]
         if not extracted_dirs:
             raise Exception("No directory found in extracted zip file")
-        
+
+        # Use the first (and typically only) directory
         actual_repo_dir = os.path.join(extract_dir, extracted_dirs[0])
+        print(f"Extracted repository directory: {extracted_dirs[0]}")
         # Move contents to tmpdir root
         for item in os.listdir(actual_repo_dir):
             src = os.path.join(actual_repo_dir, item)
@@ -82,14 +160,14 @@ def download_repo_as_zip(repo_url, branch, tmpdir):
                 else:
                     os.remove(dst)
             shutil.move(src, dst)
-        
+
         # Clean up
         if os.path.exists(zip_path):
             os.remove(zip_path)
         shutil.rmtree(extract_dir, ignore_errors=True)
-        
+
         return tmpdir
-        
+
     except Exception as e:
         raise Exception(f"Failed to download repository: {str(e)}")
 
@@ -307,6 +385,7 @@ def lambda_handler(event, context):
         error_message = str(e)
         print(f"Error in repo_ingestor: {error_message}")
         import traceback
+
         print(f"Traceback: {traceback.format_exc()}")
         error_result = {"status": "error", "message": error_message}
 
