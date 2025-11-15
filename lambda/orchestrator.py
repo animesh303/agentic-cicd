@@ -4,6 +4,7 @@ Orchestrator/Controller Lambda
 Coordinates agents and tracks tasks. Manages the workflow between different agents.
 """
 import json
+import re
 import boto3
 import os
 from datetime import datetime
@@ -32,7 +33,10 @@ dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 # Initialize DynamoDB table for task tracking (create separately in Terraform)
 TASK_TABLE_NAME = os.environ.get("TASK_TABLE_NAME", "agentic-cicd-tasks")
 AGENT_ALIAS_ID = os.environ.get("AGENT_ALIAS_ID", "TSTALIASID")
+REPO_INGESTOR_FUNCTION_NAME = os.environ.get("REPO_INGESTOR_FUNCTION_NAME")
 STATIC_ANALYZER_FUNCTION_NAME = os.environ.get("STATIC_ANALYZER_FUNCTION_NAME")
+TEMPLATE_VALIDATOR_FUNCTION_NAME = os.environ.get("TEMPLATE_VALIDATOR_FUNCTION_NAME")
+GITHUB_API_FUNCTION_NAME = os.environ.get("GITHUB_API_FUNCTION_NAME")
 
 
 def create_task_record(task_id, repo_url, status="in_progress"):
@@ -222,6 +226,29 @@ def invoke_lambda(function_name, payload):
         return {"status": "error", "message": str(e)}
 
 
+def extract_yaml_content(text):
+    """Extract YAML from agent output (handles fenced code blocks and raw YAML)."""
+    if not text:
+        return ""
+
+    fenced_match = re.search(
+        r"```(?:yaml)?\s*\n(.*?)\n```", text, re.DOTALL | re.IGNORECASE
+    )
+    if fenced_match:
+        return fenced_match.group(1).strip()
+
+    yaml_lines = []
+    capturing = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("name:", "on:", "jobs:", "workflow_dispatch:")):
+            capturing = True
+        if capturing:
+            yaml_lines.append(line)
+
+    return "\n".join(yaml_lines).strip()
+
+
 def _normalize_github_lambda_response(response):
     """Normalize responses from the GitHub API Lambda regardless of invocation format."""
     if isinstance(response, dict):
@@ -246,14 +273,19 @@ def _normalize_github_lambda_response(response):
 
 
 def execute_github_workflow(
-    owner, repo_name, branch_name, yaml_content, base_branch="main"
+    owner,
+    repo_name,
+    branch_name,
+    yaml_content,
+    pr_title,
+    pr_body,
+    base_branch="main",
 ):
     """
-    Directly orchestrate GitHub operations via the GitHub API Lambda.
+    Orchestrate GitHub operations via the GitHub API Lambda.
     Returns a dict with success flag plus individual operation responses.
     """
-    github_api_fn = os.environ.get("GITHUB_API_FUNCTION_NAME")
-    if not github_api_fn:
+    if not GITHUB_API_FUNCTION_NAME:
         return {
             "success": False,
             "error": "GITHUB_API_FUNCTION_NAME is not set in the environment",
@@ -269,7 +301,7 @@ def execute_github_workflow(
             "base_branch": base_branch,
         }
         branch_resp = _normalize_github_lambda_response(
-            invoke_lambda(github_api_fn, branch_payload)
+            invoke_lambda(GITHUB_API_FUNCTION_NAME, branch_payload)
         )
         operations["create_branch"] = branch_resp
         if branch_resp.get("status") != "success":
@@ -293,7 +325,7 @@ def execute_github_workflow(
             ],
         }
         file_resp = _normalize_github_lambda_response(
-            invoke_lambda(github_api_fn, file_payload)
+            invoke_lambda(GITHUB_API_FUNCTION_NAME, file_payload)
         )
         operations["create_file"] = file_resp
         if file_resp.get("status") != "success":
@@ -307,18 +339,14 @@ def execute_github_workflow(
             "operation": "create_pr",
             "owner": owner,
             "repo": repo_name,
-            "title": f"Add CI/CD pipeline for {repo_name}",
+            "title": pr_title,
             "head": branch_name,
             "base": base_branch,
             "draft": True,
-            "body": (
-                "This PR adds a CI/CD pipeline workflow. The pipeline includes build, "
-                "test, security scanning, container build, and deployment stages."
-            ),
-            "files": [],
+            "body": pr_body,
         }
         pr_resp = _normalize_github_lambda_response(
-            invoke_lambda(github_api_fn, pr_payload)
+            invoke_lambda(GITHUB_API_FUNCTION_NAME, pr_payload)
         )
         operations["create_pr"] = pr_resp
         if pr_resp.get("status") != "success":
@@ -374,12 +402,61 @@ def lambda_handler(event, context):
     create_task_record(task_id, repo_url)
 
     workflow_steps = []
+    repo_scanner_summary = ""
+    repo_ingestion_result = None
+    pipeline_design_result = None
+    security_recommendations = ""
+    yaml_content = ""
+
+    repo_match = re.search(r"github\.com/([^/]+)/([^/]+)", repo_url or "")
+    repo_owner = repo_match.group(1) if repo_match else "unknown"
+    repo_name = repo_match.group(2).rstrip("/") if repo_match else "unknown"
+
+    if REPO_INGESTOR_FUNCTION_NAME:
+        try:
+            print(f"Invoking repo ingestor for {repo_url} ({branch})")
+            repo_ingestion_payload = {"repo_url": repo_url, "branch": branch}
+            repo_ingestion_result = invoke_lambda(
+                REPO_INGESTOR_FUNCTION_NAME, repo_ingestion_payload
+            )
+            workflow_steps.append(
+                {"step": "repo_ingestor", "result": repo_ingestion_result}
+            )
+            if repo_ingestion_result.get("status") != "success":
+                print(
+                    f"Warning: Repo ingestor returned status {repo_ingestion_result.get('status')}: {repo_ingestion_result.get('message', 'no message')}"
+                )
+        except Exception as e:
+            print(f"Warning: Repo ingestor invocation failed: {e}")
+    else:
+        print(
+            "Warning: REPO_INGESTOR_FUNCTION_NAME not set, skipping manifest extraction"
+        )
 
     try:
         # Step 1: Repository Scanner Agent
         if "repo_scanner" in agent_ids:
             session_id = f"{task_id}-repo-scanner"
-            input_text = f"Analyze repository: {repo_url} (branch: {branch}). Extract all manifest files, detect languages, frameworks, and infrastructure components."
+            manifest_context = ""
+            if (
+                repo_ingestion_result
+                and repo_ingestion_result.get("status") == "success"
+            ):
+                manifest_context = json.dumps(
+                    repo_ingestion_result.get("manifests", {}),
+                    indent=2,
+                )
+            else:
+                manifest_context = "No manifest data is available (ingestion failed)."
+
+            input_text = f"""Analyze repository: {repo_url} (branch: {branch}).
+
+Use the manifest data below (collected by the repo_ingestor Lambda) to identify languages, build systems, Dockerfiles, test frameworks, infrastructure, and deployment targets.
+
+Manifest data:
+{manifest_context}
+
+Return a structured JSON summary with all findings. If the manifest data is incomplete, explicitly state what is missing—do not guess."""
 
             result = invoke_agent(
                 agent_ids["repo_scanner"], AGENT_ALIAS_ID, session_id, input_text
@@ -397,6 +474,7 @@ def lambda_handler(event, context):
                     "message": "Repository scanning failed",
                     "steps": workflow_steps,
                 }
+            repo_scanner_summary = result.get("completion", "")
 
         # Step 2: Static Analyzer (Lambda call, not agent)
         static_analyzer_result = None
@@ -438,19 +516,26 @@ def lambda_handler(event, context):
         # Step 3: Pipeline Designer Agent
         if "pipeline_designer" in agent_ids:
             session_id = f"{task_id}-pipeline-designer"
-            repo_analysis = workflow_steps[0].get("result", {}).get("completion", "")
+            repo_analysis = repo_scanner_summary
             input_text = f"Based on this repository analysis: {repo_analysis}, design a CI/CD pipeline with appropriate stages for build, test, scan, container build, ECR push, and ECS deployment."
 
             result = invoke_agent(
                 agent_ids["pipeline_designer"], AGENT_ALIAS_ID, session_id, input_text
             )
             workflow_steps.append({"step": "pipeline_designer", "result": result})
+            pipeline_design_result = result
 
         # Step 4: Security & Compliance Agent
         if "security_compliance" in agent_ids:
             session_id = f"{task_id}-security-compliance"
-            pipeline_design = workflow_steps[-1].get("result", {}).get("completion", "")
-            input_text = f"Review this pipeline design for security and compliance: {pipeline_design}. Ensure SAST/SCA scanning, secrets scanning, and least privilege IAM permissions."
+            pipeline_design = (
+                (pipeline_design_result or {}).get("completion", "")
+                if isinstance(pipeline_design_result, dict)
+                else ""
+            )
+            input_text = f"""Review this pipeline design for security and compliance: {pipeline_design}.
+
+Use the static analyzer results below together with the pipeline design to ensure SAST, SCA, secrets scanning, and least-privilege IAM permissions. Do not guess beyond the provided data."""
 
             # Include static analyzer results if available (even if status is not success, include what we have)
             analysis_context = ""
@@ -468,6 +553,7 @@ def lambda_handler(event, context):
                 input_text + analysis_context,
             )
             workflow_steps.append({"step": "security_compliance", "result": result})
+            security_recommendations = result.get("completion", "")
 
             if result.get("status") != "success":
                 print(
@@ -477,62 +563,82 @@ def lambda_handler(event, context):
 
         # Step 5: YAML Generator Agent
         if "yaml_generator" in agent_ids:
-            session_id = f"{task_id}-yaml-generator"
-            pipeline_design = workflow_steps[-1].get("result", {}).get("completion", "")
-            input_text = f"Generate GitHub Actions workflow YAML based on this pipeline design: {pipeline_design}. Include all stages, proper secrets management, and AWS credentials configuration."
-
-            result = invoke_agent(
-                agent_ids["yaml_generator"], AGENT_ALIAS_ID, session_id, input_text
+            pipeline_design = (
+                (pipeline_design_result or {}).get("completion", "")
+                if isinstance(pipeline_design_result, dict)
+                else ""
             )
-            workflow_steps.append({"step": "yaml_generator", "result": result})
+            base_prompt = f"""Generate GitHub Actions workflow YAML based on this pipeline design: {pipeline_design}.
 
-        # Step 6: PR Manager Agent
-        if "pr_manager" in agent_ids:
-            session_id = f"{task_id}-pr-manager"
-            yaml_content = workflow_steps[-1].get("result", {}).get("completion", "")
+Requirements:
+- Use aws-actions/configure-aws-credentials for AWS auth
+- Include security scanning and validation stages
+- Reference secrets via secrets.*
+- Add concise comments and a README-style explanation after the YAML
 
-            # Extract YAML from markdown code blocks if present
-            import re
+Return ONLY the workflow inside a ```yaml code fence followed immediately by the README text. Do not include any other prose before the YAML block."""
 
-            yaml_match = re.search(
-                r"```(?:yaml)?\s*\n(.*?)\n```", yaml_content, re.DOTALL
-            )
-            if yaml_match:
-                yaml_content = yaml_match.group(1)
-                print(
-                    f"Extracted YAML from markdown code block, length: {len(yaml_content)}"
+            max_yaml_attempts = 2
+            yaml_content = ""
+
+            for attempt in range(1, max_yaml_attempts + 1):
+                session_id = f"{task_id}-yaml-generator-attempt-{attempt}"
+                prompt = (
+                    base_prompt
+                    if attempt == 1
+                    else f"""The previous response did not include a valid YAML workflow. Try again and output ONLY the workflow inside a ```yaml fenced block followed by the README text. Do not include apologies or extra commentary.\n\n{base_prompt}"""
                 )
-            else:
-                # Try to find YAML-like content (starts with common YAML patterns)
-                yaml_lines = []
-                in_yaml = False
-                for line in yaml_content.split("\n"):
-                    if line.strip().startswith(
-                        ("name:", "on:", "jobs:", "workflow_dispatch:")
-                    ):
-                        in_yaml = True
-                    if in_yaml:
-                        yaml_lines.append(line)
-                if yaml_lines:
-                    yaml_content = "\n".join(yaml_lines)
-                    print(f"Extracted YAML from content, length: {len(yaml_content)}")
-                else:
+
+                result = invoke_agent(
+                    agent_ids["yaml_generator"], AGENT_ALIAS_ID, session_id, prompt
+                )
+                workflow_steps.append(
+                    {"step": f"yaml_generator_attempt_{attempt}", "result": result}
+                )
+
+                if result.get("status") != "success":
+                    if attempt == max_yaml_attempts:
+                        update_task_status(
+                            task_id,
+                            "failed",
+                            {
+                                "error": "YAML generation failed",
+                                "step": "yaml_generator",
+                                "steps": workflow_steps,
+                            },
+                        )
+                        return {
+                            "status": "error",
+                            "message": "YAML generation failed",
+                            "steps": workflow_steps,
+                        }
                     print(
-                        f"WARNING: Could not extract YAML content. Original content length: {len(yaml_content)}"
+                        f"YAML generator attempt {attempt} failed with status {result.get('status')} – retrying."
                     )
-                    print(f"First 500 chars of content: {yaml_content[:500]}")
+                    continue
 
-            # Validate YAML content is not empty
-            if not yaml_content or len(yaml_content.strip()) < 50:
+                raw_yaml_output = result.get("completion", "")
+                yaml_content = extract_yaml_content(raw_yaml_output)
+                print(f"Extracted YAML content length: {len(yaml_content)}")
+                if yaml_content:
+                    print(f"YAML preview: {yaml_content[:200]}")
+
+                if yaml_content and len(yaml_content.strip()) >= 50:
+                    break
+
                 print(
-                    f"ERROR: YAML content is too short or empty. Length: {len(yaml_content) if yaml_content else 0}"
+                    f"YAML generator attempt {attempt} did not include a usable workflow (length={len(yaml_content)})."
                 )
+                yaml_content = ""
+
+            if not yaml_content:
                 update_task_status(
                     task_id,
                     "failed",
                     {
                         "error": "YAML content is empty or too short",
-                        "step": "pr_manager",
+                        "step": "yaml_generator",
+                        "steps": workflow_steps,
                     },
                 )
                 return {
@@ -541,198 +647,160 @@ def lambda_handler(event, context):
                     "steps": workflow_steps,
                 }
 
-            # Parse repo URL to get owner and repo
-            repo_match = re.search(r"github\.com/([^/]+)/([^/]+)", repo_url)
-            owner = repo_match.group(1) if repo_match else "unknown"
-            repo_name = repo_match.group(2).rstrip("/") if repo_match else "unknown"
+            if TEMPLATE_VALIDATOR_FUNCTION_NAME:
+                validator_payload = {
+                    "yaml_content": yaml_content,
+                    "validation_level": "normal",
+                }
+                validator_result = invoke_lambda(
+                    TEMPLATE_VALIDATOR_FUNCTION_NAME, validator_payload
+                )
+                if "status" not in validator_result:
+                    validator_result["status"] = (
+                        "success"
+                        if validator_result.get("valid")
+                        else "validation_failed"
+                    )
+                workflow_steps.append(
+                    {"step": "template_validator", "result": validator_result}
+                )
+                if not validator_result.get("valid", False):
+                    summary_errors = (
+                        validator_result.get("summary", {}).get("errors")
+                        or validator_result.get("syntax", {}).get("errors")
+                        or []
+                    )
+                    detail = "; ".join(summary_errors[:3])
+                    error_msg = "Template validator reported invalid YAML" + (
+                        f": {detail}" if detail else ""
+                    )
+                    print(f"Template validator errors: {summary_errors}")
+                    print(f"Invalid YAML content:\n{yaml_content}")
+                    update_task_status(
+                        task_id,
+                        "failed",
+                        {
+                            "error": error_msg,
+                            "step": "template_validator",
+                            "steps": workflow_steps,
+                        },
+                    )
+                    return {
+                        "status": "error",
+                        "message": error_msg,
+                        "steps": workflow_steps,
+                    }
+            else:
+                print(
+                    "Warning: TEMPLATE_VALIDATOR_FUNCTION_NAME not set, skipping YAML validation"
+                )
 
-            print(
-                f"PR Manager: owner={owner}, repo={repo_name}, yaml_length={len(yaml_content)}"
+        # Step 6: PR Manager Agent (documentation only)
+        pr_body = ""
+        pr_title = f"Add CI/CD pipeline for {repo_name}"
+        if "pr_manager" in agent_ids:
+            session_id = f"{task_id}-pr-manager"
+            pipeline_summary = (
+                (pipeline_design_result or {}).get("completion", "")
+                if isinstance(pipeline_design_result, dict)
+                else ""
             )
-            print(f"YAML content preview (first 200 chars): {yaml_content[:200]}")
+            security_summary = (
+                security_recommendations or "Security review not available."
+            )
+            yaml_section = (
+                f"```yaml\n{yaml_content}\n```"
+                if yaml_content
+                else "YAML generation failed."
+            )
 
-            # Format YAML content for the agent - provide it in a clear, copyable format
-            # Use triple backticks to make it clear this is the YAML content
-            yaml_section = f"""
-```yaml
-{yaml_content}
-```
-"""
+            input_text = f"""You are drafting a GitHub PR description for the new CI/CD workflow.
 
-            input_text = f"""You are creating a GitHub PR with a CI/CD workflow file. You MUST follow these steps EXACTLY in order. DO NOT skip any step.
+Repository: {repo_url}
+Base branch: {branch}
 
-REPOSITORY INFORMATION:
-- Repository URL: {repo_url}
-- Owner: {owner}
-- Repo: {repo_name}
-- Base branch: main
+Pipeline summary:
+{pipeline_summary}
 
-WORKFLOW YAML CONTENT TO USE:
+Security findings:
+{security_summary}
+
+Workflow YAML reference:
 {yaml_section}
 
-STEP 1: CREATE BRANCH
-You MUST call the create_branch operation FIRST. Use these exact parameters:
-{{
-  "operation": "create_branch",
-  "owner": "{owner}",
-  "repo": "{repo_name}",
-  "branch": "ci-cd/add-pipeline",
-  "base_branch": "main"
-}}
-
-STEP 2: CREATE WORKFLOW FILE (MANDATORY - DO NOT SKIP)
-After step 1 succeeds, you MUST call the create_file operation. Use these exact parameters:
-{{
-  "operation": "create_file",
-  "owner": "{owner}",
-  "repo": "{repo_name}",
-  "branch": "ci-cd/add-pipeline",
-  "files": [
-    {{
-      "path": ".github/workflows/ci-cd.yml",
-      "content": {json.dumps(yaml_content)},
-      "message": "Add CI/CD pipeline workflow"
-    }}
-  ]
-}}
-
-STEP 3: CREATE PR
-After step 2 succeeds, you MUST call the create_pr operation. Use these exact parameters:
-{{
-  "operation": "create_pr",
-  "owner": "{owner}",
-  "repo": "{repo_name}",
-  "title": "Add CI/CD pipeline for {repo_name}",
-  "head": "ci-cd/add-pipeline",
-  "base": "main",
-  "draft": true,
-  "body": "This PR adds a CI/CD pipeline workflow. The pipeline includes build, test, security scanning, container build, and deployment stages."
-}}
-
-CRITICAL REQUIREMENTS:
-1. You MUST execute all 3 steps in the exact order shown: create_branch → create_file → create_pr
-2. You MUST NOT skip step 2. The create_file operation is MANDATORY.
-3. The file path MUST be exactly: .github/workflows/ci-cd.yml
-4. Use the YAML content provided above exactly as shown
-5. Wait for each operation to complete successfully before proceeding to the next step
-6. If any operation fails, report the error and stop - do not continue
-
-IMPORTANT: The create_file operation is available in your action group. You MUST use it to create the workflow file."""
+Return Markdown with sections: Summary, Testing / Validation, Required Secrets & IAM, Deployment / Rollback Notes. Highlight any follow-up tasks."""
 
             result = invoke_agent(
                 agent_ids["pr_manager"], AGENT_ALIAS_ID, session_id, input_text
             )
             workflow_steps.append({"step": "pr_manager", "result": result})
+            pr_body = result.get("completion", "").strip()
 
-            # Check what operations the agent actually called
-            invocations = result.get("action_group_invocations", [])
-            branch_name = "ci-cd/add-pipeline"
-            fallback_info = {"used": False}
-            fallback_required = False
-            fallback_reason = None
-
-            completion_lower = (result.get("completion") or "").lower()
-
-            if invocations:
+            if not pr_body:
                 print(
-                    f"PR Manager agent invoked {len(invocations)} action group operations:"
-                )
-                for inv in invocations:
-                    print(
-                        f"  - {inv.get('http_method', 'unknown')} {inv.get('api_path', 'unknown')}"
-                    )
-
-                create_file_called = any(
-                    inv.get("api_path", "").endswith("/create-file")
-                    or "create_file" in str(inv.get("api_path", "")).lower()
-                    for inv in invocations
-                )
-                create_branch_called = any(
-                    inv.get("api_path", "").endswith("/create-branch")
-                    or "create_branch" in str(inv.get("api_path", "")).lower()
-                    for inv in invocations
-                )
-                create_pr_called = any(
-                    inv.get("api_path", "").endswith("/create-pr")
-                    or "create_pr" in str(inv.get("api_path", "")).lower()
-                    for inv in invocations
+                    "PR Manager agent returned empty content; using default PR template."
                 )
 
-                print(
-                    f"Operations called: branch={create_branch_called}, file={create_file_called}, pr={create_pr_called}"
-                )
+        if not pr_body:
+            pr_body = (
+                "## Summary\n"
+                "Adds an automated CI/CD workflow covering validation, security scanning, planning, deployment, and drift checks.\n\n"
+                "## Testing / Validation\n"
+                "- Trigger workflow on a PR and review tfsec/checkov/infracost outputs.\n"
+                "- Run `terraform plan` locally before merging.\n\n"
+                "## Required Secrets / IAM\n"
+                "- AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY with least-privilege Terraform access.\n"
+                "- INFRACOST_API_KEY for cost estimation.\n\n"
+                "## Deployment / Rollback\n"
+                "- Workflow deploys from `main` with approvals.\n"
+                "- Revert by rolling back `.github/workflows/ci-cd.yml` if needed."
+            )
 
-                missing_operations = []
-                if not create_branch_called:
-                    missing_operations.append("create_branch")
-                if not create_file_called:
-                    missing_operations.append("create_file")
-                if not create_pr_called:
-                    missing_operations.append("create_pr")
+        if yaml_content:
+            github_branch = "ci-cd/add-pipeline"
+            github_result = execute_github_workflow(
+                repo_owner,
+                repo_name,
+                github_branch,
+                yaml_content,
+                pr_title,
+                pr_body,
+                base_branch=branch,
+            )
+            github_result["status"] = (
+                "success" if github_result.get("success") else "error"
+            )
+            workflow_steps.append(
+                {"step": "github_operations", "result": github_result}
+            )
 
-                if missing_operations:
-                    fallback_required = True
-                    fallback_reason = (
-                        f"missing_operations:{','.join(missing_operations)}"
-                    )
-            else:
-                print("WARNING: No action group invocations detected in agent response")
-                fallback_required = True
-                fallback_reason = "no_action_invocations"
-
-            error_indicators = [
-                "cannot complete this task",
-                "missing critical operations",
-                "not available in my function set",
-            ]
-            if any(indicator in completion_lower for indicator in error_indicators):
-                fallback_required = True
-                if not fallback_reason:
-                    fallback_reason = "agent_reported_missing_operations"
-
-            if fallback_required:
-                print(
-                    f"WARNING: PR Manager agent could not execute required operations ({fallback_reason})."
-                )
-                print("Triggering GitHub API Lambda fallback workflow...")
-                fallback_outcome = execute_github_workflow(
-                    owner, repo_name, branch_name, yaml_content, base_branch="main"
-                )
-                fallback_info = {
-                    "used": True,
-                    "reason": fallback_reason,
-                    "outcome": fallback_outcome,
-                }
-                workflow_steps[-1]["result"]["fallback"] = fallback_info
-
-                if not fallback_outcome.get("success"):
-                    error_msg = fallback_outcome.get(
-                        "error", "GitHub fallback failed for unknown reasons"
-                    )
-                    print(f"ERROR: GitHub fallback failed: {error_msg}")
-                    update_task_status(
-                        task_id,
-                        "failed",
-                        {
-                            "error": f"PR Manager fallback failed: {error_msg}",
-                            "step": "pr_manager",
-                        },
-                    )
-                    return {
-                        "status": "error",
-                        "message": f"PR Manager fallback failed: {error_msg}",
+            if not github_result.get("success"):
+                update_task_status(
+                    task_id,
+                    "failed",
+                    {
+                        "error": github_result.get("error", "GitHub operations failed"),
+                        "step": "github_operations",
                         "steps": workflow_steps,
-                    }
-                else:
-                    print("SUCCESS: GitHub fallback created branch/file/PR.")
-            else:
-                workflow_steps[-1]["result"]["fallback"] = fallback_info
-
-            # Don't fail the entire workflow if PR creation fails - it's not critical
-            if result.get("status") != "success":
-                print(f"Warning: PR Manager agent returned: {result.get('status')}")
-                print(f"Error message: {result.get('message', 'No error message')}")
-                print("Continuing workflow despite PR creation failure")
+                    },
+                )
+                return {
+                    "status": "error",
+                    "message": github_result.get("error", "GitHub operations failed"),
+                    "steps": workflow_steps,
+                }
+        else:
+            error_msg = "YAML content missing; cannot update GitHub"
+            update_task_status(
+                task_id,
+                "failed",
+                {"error": error_msg, "step": "yaml_generator"},
+            )
+            return {
+                "status": "error",
+                "message": error_msg,
+                "steps": workflow_steps,
+            }
 
         # Update task as completed
         update_task_status(task_id, "completed", {"steps": workflow_steps})

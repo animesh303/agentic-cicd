@@ -1,0 +1,81 @@
+{
+  "status": "error",
+  "message": "security_compliance agent did not invoke required action group calls: static-analyzer-action. Re-prepare the agent or update the associated OpenAPI schema.",
+  "steps": [
+    {
+      "step": "repo_ingestor",
+      "result": {
+        "status": "success",
+        "repo_url": "https://github.com/animesh303/animesh303",
+        "branch": "main",
+        "manifests": {
+          "dockerfiles": [],
+          "package_manifests": [],
+          "infrastructure": [
+            {
+              "path": "variables.tf",
+              "type": "terraform",
+              "content": "variable \"bucket_name\" {\n  type        = string\n  description = \"Name of the S3 bucket\"\n}\n\nvariable \"instance_type\" {\n  type        = string\n  default     = \"t2.micro\"\n  description = \"EC2 Instance Type\"\n}\n"
+            },
+            {
+              "path": "main.tf",
+              "type": "terraform",
+              "content": "# Create S3 Bucket\nresource \"aws_s3_bucket\" \"sample\" {\n  bucket = var.bucket_name\n\n  tags = {\n    Name = \"sample-bucket\"\n    Env  = \"dev\"\n  }\n}\n\n# Create EC2 Instance\nresource \"aws_instance\" \"demo\" {\n  ami           = \"ami-0c55b159cbfafe1f0\" # Example Amazon Linux 2 AMI (update for your region)\n  instance_type = var.instance_type\n\n  tags = {\n    Name = \"demo-instance\"\n  }\n}\n"
+            },
+            {
+              "path": "provider.tf",
+              "type": "terraform",
+              "content": "terraform {\n  required_version = \">= 1.5.0\"\n\n  required_providers {\n    aws = {\n      source  = \"hashicorp/aws\"\n      version = \"~> 5.0\"\n    }\n  }\n}\n\nprovider \"aws\" {\n  region = \"us-east-1\"\n}\n"
+            },
+            {
+              "path": "outputs.tf",
+              "type": "terraform",
+              "content": "output \"bucket_id\" {\n  value = aws_s3_bucket.sample.id\n}\n\noutput \"instance_public_ip\" {\n  value = aws_instance.demo.public_ip\n}\n"
+            }
+          ],
+          "kubernetes": [],
+          "helm": []
+        }
+      }
+    },
+    {
+      "step": "repo_scanner",
+      "result": {
+        "status": "success",
+        "completion": "{\n  \"repository_analysis\": {\n    \"languages_and_frameworks\": {\n      \"detected\": [\"HCL (HashiCorp Configuration Language)\"],\n      \"manifest_files\": []\n    },\n    \"build_systems\": {\n      \"detected\": [],\n      \"manifest_files\": []\n    },\n    \"containerization\": {\n      \"detected\": false,\n      \"dockerfiles\": []\n    },\n    \"testing\": {\n      \"detected\": false,\n      \"frameworks\": [],\n      \"test_files\": []\n    },\n    \"infrastructure\": {\n      \"terraform\": {\n        \"detected\": true,\n        \"version\": \">= 1.5.0\",\n        \"provider\": {\n          \"aws\": {\n            \"version\": \"~> 5.0\",\n            \"region\": \"us-east-1\"\n          }\n        },\n        \"resources\": [\n          \"aws_s3_bucket\",\n          \"aws_instance\"\n        ],\n        \"files\": [\n          \"main.tf\",\n          \"variables.tf\",\n          \"outputs.tf\",\n          \"provider.tf\"\n        ]\n      },\n      \"kubernetes\": {\n        \"detected\": false,\n        \"files\": []\n      },\n      \"helm\": {\n        \"detected\": false,\n        \"files\": []\n      }\n    },\n    \"deployment_targets\": {\n      \"detected\": [\n        \"AWS EC2\",\n        \"AWS S3\"\n      ]\n    },\n    \"missing_data\": [\n      \"Source code files and their languages\",\n      \"Build configuration files\",\n      \"Package manager manifests\",\n      \"Test files and configurations\"\n    ]\n  }\n}",
+        "action_group_invocations": []
+      }
+    },
+    {
+      "step": "static_analyzer",
+      "result": {
+        "repo_url": "https://github.com/animesh303/animesh303",
+        "branch": "main",
+        "dockerfile_analysis": [],
+        "dependency_analysis": [],
+        "test_analysis": { "test_files": [], "test_directories": [] },
+        "vulnerability_scan": {
+          "status": "not_implemented",
+          "note": "Requires Trivy/Snyk integration"
+        },
+        "status": "success"
+      }
+    },
+    {
+      "step": "pipeline_designer",
+      "result": {
+        "status": "success",
+        "completion": "CI/CD Pipeline Design for Terraform Infrastructure:\n\n1. Initialize Stage:\n   - Checkout code\n   - Configure AWS credentials\n   - Install Terraform\n   - Cache Terraform plugins (~/.terraform)\n\n2. Validation Stage:\n   - Parallel execution:\n     * terraform fmt check\n     * terraform validate\n     * tflint static analysis\n     * checkov infrastructure security scanning\n     * tfsec security scanning\n\n3. Security Scanning:\n   - Parallel execution:\n     * Snyk IaC scan\n     * Trivy config scan\n     * KICS infrastructure scanning\n\n4. Plan Stage:\n   - Terraform init\n   - Terraform plan\n   - Store plan artifact\n   - Post plan summary as PR comment\n\n5. Approval Gate (for production):\n   - Manual approval required\n   - Plan review\n\n6. Apply Stage:\n   - Download plan artifact\n   - Terraform apply\n   - Store terraform output as artifact\n\n7. Verification Stage:\n   - AWS resource validation\n   - Infrastructure smoke tests\n\nPipeline Configurations:\n- Trigger: On pull request and merge to main\n- Environment segregation: dev/staging/prod workspaces\n- State management: Remote state in S3\n- Artifact retention: 14 days\n- Timeout: 30 minutes per stage\n- Concurrency: Limited to 1 per branch/environment",
+        "action_group_invocations": []
+      }
+    },
+    {
+      "step": "security_compliance",
+      "result": {
+        "status": "success",
+        "completion": "Security and Compliance Assessment:\n\nStrengths:\n1. Multiple security scanning tools (Snyk, Trivy, KICS, checkov, tfsec)\n2. Manual approval gate for production\n3. Environment segregation using workspaces\n4. Concurrency controls to prevent parallel deployments\n\nCritical Gaps and Recommendations:\n\n1. IAM Security:\n- Implement time-bound, temporary AWS credentials\n- Add AWS role assumption with minimum required permissions per environment\n- Define explicit IAM policies in terraform code with least privilege\n\n2. Secrets Management:\n- Add secrets scanning step before terraform operations\n- Use AWS Secrets Manager/Parameter Store for sensitive values\n- Implement git-secrets pre-commit hooks\n- Add SAST scanning for hardcoded credentials\n\n3. State Security:\n- Enable S3 bucket encryption for terraform state\n- Add state locking using DynamoDB\n- Configure S3 bucket versioning\n- Implement state file backup\n\n4. Pipeline Hardening:\n- Add SHA256 verification for terraform binary\n- Implement provider version constraints\n- Add terraform security baseline checks\n- Enable detailed AWS CloudTrail logging\n\n5. Compliance Controls:\n- Add compliance policy checks (CIS, NIST)\n- Implement cost estimation checks\n- Add automated security report generation\n- Include compliance validation in approval stage\n\nRequired Actions:\n1. Implement missing security controls in pipeline\n2. Add automated security testing\n3. Enhance IAM security configurations\n4. Enable comprehensive audit logging\n5. Add compliance validation steps\n\nThe static analysis shows no Dockerfiles, dependencies, or tests present in the repository, suggesting infrastructure code may be in a different repository. Recommend running analysis on the actual infrastructure repository.",
+        "action_group_invocations": []
+      }
+    }
+  ]
+}

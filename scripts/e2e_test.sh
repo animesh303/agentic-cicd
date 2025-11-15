@@ -459,31 +459,6 @@ test_s3() {
     fi
 }
 
-record_pr_manager_status() {
-    local steps_json="$1"
-    if ! command -v jq &> /dev/null; then
-        return
-    fi
-
-    local fallback_used fallback_reason
-    fallback_used=$(echo "$steps_json" | jq -r '.[] | select(.step == "pr_manager") | .result.fallback.used // "false"' 2>/dev/null || echo "false")
-    fallback_reason=$(echo "$steps_json" | jq -r '.[] | select(.step == "pr_manager") | .result.fallback.reason // ""' 2>/dev/null || echo "")
-
-    if [ -z "$fallback_used" ]; then
-        log_warn "PR Manager step not found in workflow steps"
-        add_test_result "end_to_end_test" "pr_manager_fallback" "warn" "PR Manager step missing from workflow trace" "{}"
-        return
-    fi
-
-    if [ "$fallback_used" = "true" ]; then
-        log_warn "PR Manager agent required GitHub fallback (reason: ${fallback_reason:-unknown})"
-        add_test_result "end_to_end_test" "pr_manager_fallback" "warn" "GitHub fallback executed" "{\"reason\": \"${fallback_reason:-unknown}\"}"
-    else
-        log_pass "PR Manager agent executed GitHub operations via action group"
-        add_test_result "end_to_end_test" "pr_manager_fallback" "pass" "Action group operations executed" "{}"
-    fi
-}
-
 verify_github_artifacts() {
     local owner="$1"
     local repo="$2"
@@ -525,13 +500,73 @@ verify_github_artifacts() {
     return 0
 }
 
+check_repo_ingestor_step() {
+    local steps_json="$1"
+    local status
+    status=$(printf '%s\n' "$steps_json" | jq -r '.[] | select(.step == "repo_ingestor") | .result.status // empty' 2>/dev/null || echo "")
+
+    if [ -z "$status" ]; then
+        log_warn "repo_ingestor step not found in workflow trace"
+        add_test_result "end_to_end_test" "repo_ingestor_step" "warn" "repo_ingestor step missing from workflow trace" "{}"
+    elif [ "$status" = "success" ]; then
+        log_pass "repo_ingestor Lambda returned manifest data"
+        add_test_result "end_to_end_test" "repo_ingestor_step" "pass" "repo_ingestor Lambda succeeded" "{}"
+    else
+        log_fail "repo_ingestor Lambda failed (status: $status)"
+        add_test_result "end_to_end_test" "repo_ingestor_step" "fail" "repo_ingestor Lambda failed" "{\"status\": \"$status\"}"
+    fi
+}
+
+check_template_validator_step() {
+    local steps_json="$1"
+    local status
+    status=$(printf '%s\n' "$steps_json" | jq -r '.[] | select(.step == "template_validator") | .result.status // empty' 2>/dev/null || echo "")
+    local valid_flag
+    valid_flag=$(printf '%s\n' "$steps_json" | jq -r '.[] | select(.step == "template_validator") | .result.valid // empty' 2>/dev/null || echo "")
+
+    if [ -z "$status" ]; then
+        log_warn "template_validator step not found in workflow trace"
+        add_test_result "end_to_end_test" "template_validator_step" "warn" "template_validator step missing from workflow trace" "{}"
+    elif [ "$status" = "success" ] && { [ -z "$valid_flag" ] || [ "$valid_flag" = "true" ]; }; then
+        log_pass "Template validator Lambda confirmed workflow YAML"
+        add_test_result "end_to_end_test" "template_validator_step" "pass" "template validator reported valid YAML" "{}"
+    else
+        log_fail "Template validator reported invalid YAML"
+        add_test_result "end_to_end_test" "template_validator_step" "fail" "template validator flagged invalid YAML" "{}"
+    fi
+}
+
+check_github_operations_step() {
+    local steps_json="$1"
+    local success_flag
+    success_flag=$(printf '%s\n' "$steps_json" | jq -r '.[] | select(.step == "github_operations") | .result.success // empty' 2>/dev/null || echo "")
+
+    if [ -z "$success_flag" ]; then
+        log_warn "github_operations step not found in workflow trace"
+        add_test_result "end_to_end_test" "github_operations_step" "warn" "GitHub operations step missing from workflow trace" "{}"
+    elif [ "$success_flag" = "true" ]; then
+        log_pass "GitHub Lambda created branch/file/PR"
+        add_test_result "end_to_end_test" "github_operations_step" "pass" "GitHub Lambda succeeded" "{}"
+    else
+        log_fail "GitHub Lambda failed to create branch/file/PR"
+        add_test_result "end_to_end_test" "github_operations_step" "fail" "GitHub Lambda failed" "{}"
+    fi
+}
+
+validate_workflow_requirements() {
+    local steps_json="$1"
+    check_repo_ingestor_step "$steps_json"
+    check_template_validator_step "$steps_json"
+    check_github_operations_step "$steps_json"
+    WORKFLOW_REQUIREMENTS_VALIDATED=true
+}
+
 # End-to-End Workflow Test
 test_end_to_end_workflow() {
     log_section "End-to-End Workflow Test"
     
     LAMBDA_ORCHESTRATOR=$(terraform output -raw lambda_orchestrator 2>/dev/null || echo "")
     AGENT_IDS=$(terraform output -json agent_ids_map 2>/dev/null || echo "{}")
-    
     if [ -z "$LAMBDA_ORCHESTRATOR" ]; then
         log_fail "Orchestrator Lambda name not found"
         add_test_result "end_to_end_test" "orchestrator_invocation" "fail" "Lambda name not found" "{}"
@@ -593,6 +628,7 @@ test_end_to_end_workflow() {
                 
                 # Check each step
                 log_info "Workflow steps completed: $STEP_COUNT"
+                validate_workflow_requirements "$STEPS"
                 for i in $(seq 0 $((STEP_COUNT - 1))); do
                     STEP_NAME=$(echo "$STEPS" | jq -r ".[$i].step // \"unknown\"" 2>/dev/null || echo "unknown")
                     STEP_STATUS=$(echo "$STEPS" | jq -r ".[$i].result.status // \"unknown\"" 2>/dev/null || echo "unknown")
@@ -682,7 +718,7 @@ test_end_to_end_workflow() {
                         
                         # Check each step
                         log_info "Workflow steps completed: $STEP_COUNT"
-                        record_pr_manager_status "$WORKFLOW_STEPS"
+                        validate_workflow_requirements "$WORKFLOW_STEPS"
                         for i in $(seq 0 $((STEP_COUNT - 1))); do
                             STEP_NAME=$(echo "$WORKFLOW_STEPS" | jq -r ".[$i].step // \"unknown\"" 2>/dev/null || echo "unknown")
                             STEP_STATUS=$(echo "$WORKFLOW_STEPS" | jq -r ".[$i].result.status // \"unknown\"" 2>/dev/null || echo "unknown")
@@ -705,7 +741,8 @@ test_end_to_end_workflow() {
             elif [ "$TASK_STATUS" = "failed" ]; then
                 ERROR_MSG=$(echo "$TASK_RESULT" | jq -r '.error // "Unknown error"' 2>/dev/null || echo "Unknown error")
                 log_fail "End-to-end workflow failed (verified via DynamoDB): $ERROR_MSG"
-                add_test_result "end_to_end_test" "workflow_execution" "fail" "Workflow failed (verified via DynamoDB)" "{\"duration_seconds\": $DURATION, \"task_id\": \"$TASK_ID\", \"error\": \"$ERROR_MSG\"}"
+                ERROR_JSON=$(printf '%s' "$ERROR_MSG" | jq -Rs . 2>/dev/null || printf '"%s"' "$ERROR_MSG")
+                add_test_result "end_to_end_test" "workflow_execution" "fail" "Workflow failed (verified via DynamoDB)" "{\"duration_seconds\": $DURATION, \"task_id\": \"$TASK_ID\", \"error\": $ERROR_JSON}"
             fi
         else
             log_warn "Task record not found in DynamoDB after waiting"

@@ -8,13 +8,24 @@ import yaml
 import re
 
 
+class LiteralSafeLoader(yaml.SafeLoader):
+    """Safe loader that treats words like 'on'/'off' as plain strings."""
+
+
+for first_letter, resolvers in list(LiteralSafeLoader.yaml_implicit_resolvers.items()):
+    filtered = [
+        (tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:bool"
+    ]
+    LiteralSafeLoader.yaml_implicit_resolvers[first_letter] = filtered
+
+
 def validate_yaml_syntax(yaml_content):
     """Validate YAML syntax"""
     errors = []
     warnings = []
 
     try:
-        parsed = yaml.safe_load(yaml_content)
+        parsed = yaml.load(yaml_content, Loader=LiteralSafeLoader)
         if not parsed:
             errors.append("YAML is empty or invalid")
             return {"valid": False, "errors": errors, "warnings": warnings}
@@ -70,7 +81,7 @@ def validate_permissions(yaml_content):
     """Check IAM permissions and least privilege"""
     warnings = []
 
-    parsed = yaml.safe_load(yaml_content)
+    parsed = yaml.load(yaml_content, Loader=LiteralSafeLoader)
     if not parsed:
         return {"warnings": warnings}
 

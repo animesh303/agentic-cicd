@@ -292,10 +292,12 @@ resource "aws_lambda_function" "orchestrator" {
   timeout          = 900
   environment {
     variables = {
-      TASK_TABLE_NAME               = aws_dynamodb_table.task_tracking.name
-      AGENT_ALIAS_ID                = var.agent_alias_id
-      STATIC_ANALYZER_FUNCTION_NAME = aws_lambda_function.static_analyzer.function_name
-      GITHUB_API_FUNCTION_NAME      = aws_lambda_function.github_api.function_name
+      TASK_TABLE_NAME                  = aws_dynamodb_table.task_tracking.name
+      AGENT_ALIAS_ID                   = var.agent_alias_id
+      REPO_INGESTOR_FUNCTION_NAME      = aws_lambda_function.repo_ingestor.function_name
+      STATIC_ANALYZER_FUNCTION_NAME    = aws_lambda_function.static_analyzer.function_name
+      TEMPLATE_VALIDATOR_FUNCTION_NAME = aws_lambda_function.template_validator.function_name
+      GITHUB_API_FUNCTION_NAME         = aws_lambda_function.github_api.function_name
     }
   }
   depends_on = [
@@ -421,15 +423,18 @@ resource "aws_bedrockagent_agent" "repo_scanner_agent" {
   agent_resource_role_arn = aws_iam_role.bedrock_agent_role.arn
   foundation_model        = var.bedrock_foundation_model
   instruction             = <<EOF
-You are a repository analysis expert. Your role is to analyze source repositories and identify:
-- Programming languages and frameworks
-- Build systems and package managers
-- Dockerfiles and containerization
-- Test frameworks and test files
-- Infrastructure as Code (Terraform, CloudFormation, Helm, Kubernetes)
-- Deployment targets (ECR, ECS, Lambda, etc.)
+You are a repository analysis expert. The orchestrator provides you with manifest data collected by the repo_ingestor Lambda. Your task is to transform that data into an accurate repository inventory.
 
-Return a structured JSON summary with all findings.
+WORKFLOW:
+1. Carefully review the provided manifest/test metadata (it will be included in the user instructions).
+2. Use that data to determine:
+   - Programming languages and frameworks
+   - Build systems and package managers
+   - Dockerfiles and containerization
+   - Test frameworks and test files
+   - Infrastructure as Code (Terraform, CloudFormation, Helm, Kubernetes)
+   - Deployment targets (ECR, ECS, Lambda, etc.)
+3. Return a structured JSON summary with all findings. If the manifest data is incomplete, explicitly state what is missing—never guess.
 
 IMPORTANT: Do not use thinking tags or chain-of-thought reasoning. Provide direct answers only.
 EOF
@@ -467,15 +472,15 @@ resource "aws_bedrockagent_agent" "security_compliance_agent" {
   agent_resource_role_arn = aws_iam_role.bedrock_agent_role.arn
   foundation_model        = var.bedrock_foundation_model
   instruction             = <<EOF
-You are a security and compliance expert for CI/CD pipelines. Review pipeline designs and ensure:
-- SAST (Static Application Security Testing) is included
+You are a security and compliance expert for CI/CD pipelines. The orchestrator provides you with the latest static_analyzer Lambda output (Dockerfile, dependency, and test analysis). Use that data plus the pipeline design to ensure:
+- SAST (Static Application Security Testing)
 - SCA (Software Composition Analysis) for dependencies
 - Secrets scanning in code and containers
 - Least privilege IAM permissions
 - Security best practices for AWS deployments
 - Compliance with organizational security policies
 
-Provide security recommendations and compliance checks.
+Provide actionable security recommendations. If the analyzer results are missing or incomplete, explicitly request the missing data instead of guessing.
 
 IMPORTANT: Do not use thinking tags or chain-of-thought reasoning. Provide direct answers only.
 EOF
@@ -491,15 +496,16 @@ resource "aws_bedrockagent_agent" "yaml_generator_agent" {
   instruction             = <<EOF
 You are a GitHub Actions workflow generator. Convert pipeline designs into concrete GitHub Actions YAML workflows.
 
-Requirements:
-- Use aws-actions/configure-aws-credentials for AWS authentication
-- Use amazon-ecr-login for ECR authentication
-- Include proper secrets management with secrets.*
-- Follow GitHub Actions best practices
-- Include comments explaining each stage
-- Generate a README section explaining the pipeline
+WORKFLOW:
+1. Generate workflow YAML that:
+   - Uses aws-actions/configure-aws-credentials for AWS authentication
+   - Runs formatting/tests/security scans (tfsec, checkov, etc.)
+   - References secrets with secrets.*
+   - Adds helpful comments for each major stage
+2. Append a README-style explanation describing the pipeline, required secrets, and deployment flow.
+3. Return the workflow inside a ```yaml code block followed by the README text.
 
-Return only valid YAML in a code block.
+NOTE: The orchestrator handles template validation separately—focus on returning high-quality YAML and documentation.
 
 IMPORTANT: Do not use thinking tags or chain-of-thought reasoning. Provide direct answers only.
 EOF
@@ -513,51 +519,18 @@ resource "aws_bedrockagent_agent" "pr_manager_agent" {
   agent_resource_role_arn = aws_iam_role.bedrock_agent_role.arn
   foundation_model        = var.bedrock_foundation_model
   instruction             = <<EOF
-You are a GitHub PR manager. Your task is to create pull requests with GitHub Actions workflow files.
+You are a GitHub PR manager. Craft a clear, reviewer-friendly pull request description for the generated CI/CD workflow.
 
-YOU HAVE ACCESS TO THREE OPERATIONS IN YOUR ACTION GROUP:
-1. create_branch - Creates a new branch in the repository
-2. create_file - Creates or updates files in a branch (THIS IS CRITICAL - YOU MUST USE THIS)
-3. create_pr - Creates a pull request
+OUTPUT REQUIREMENTS:
+1. Provide the response in Markdown with the following sections:
+   - Summary (what the workflow does)
+   - Testing / Validation instructions
+   - Required Secrets and IAM permissions
+   - Deployment / Rollback considerations
+2. Highlight any manual follow-up tasks (updating secrets, reviewing AWS roles, etc.)
+3. Keep the tone professional and concise.
 
-WORKFLOW (EXECUTE IN THIS EXACT ORDER):
-
-STEP 1: Create Branch
-Call the create_branch operation with:
-- operation: "create_branch"
-- owner: (extract from repository URL)
-- repo: (extract from repository URL)
-- branch: "ci-cd/add-pipeline"
-- base_branch: "main"
-
-STEP 2: Create Workflow File (MANDATORY - DO NOT SKIP)
-After the branch is created, you MUST call the create_file operation. This is the most important step.
-Call it with:
-- operation: "create_file"
-- owner: (same as step 1)
-- repo: (same as step 1)
-- branch: "ci-cd/add-pipeline" (the branch from step 1)
-- files: [{"path": ".github/workflows/ci-cd.yml", "content": "<YAML_CONTENT_FROM_INSTRUCTIONS>", "message": "Add CI/CD pipeline workflow"}]
-
-The YAML content will be provided in the user's instructions. Extract it exactly and use it as the "content" field in the files array.
-
-STEP 3: Create PR
-After the file is created, call the create_pr operation with:
-- operation: "create_pr"
-- owner: (same as step 1)
-- repo: (same as step 1)
-- title: "Add CI/CD pipeline for [repo-name]"
-- head: "ci-cd/add-pipeline"
-- base: "main"
-- draft: true
-- body: Comprehensive description
-
-CRITICAL REQUIREMENTS:
-1. You MUST execute all 3 steps in order. DO NOT skip step 2.
-2. The create_file operation is available in your action group - you MUST use it.
-3. The file path MUST be exactly: .github/workflows/ci-cd.yml
-4. Extract YAML content from markdown code blocks if present (remove the ```yaml and ``` markers)
-5. If you cannot find the create_file operation, report an error - do not proceed without creating the file.
+Do NOT attempt to call GitHub APIs or create branches yourself—the orchestrator handles repository updates. Focus on producing an excellent PR description.
 
 IMPORTANT: Do not use thinking tags or chain-of-thought reasoning. Provide direct answers only.
 EOF
@@ -595,7 +568,7 @@ resource "aws_bedrockagent_agent_action_group" "repo_scanner_lambda_action" {
   agent_id          = aws_bedrockagent_agent.repo_scanner_agent.id
   agent_version     = "DRAFT"
   action_group_name = "repo-ingestor-action"
-  description       = "Invoke repository ingestor Lambda to extract manifest files"
+  description       = "Invoke repository ingestor Lambda to extract manifest files (schema ${substr(aws_s3_object.repo_ingestor_openapi.etag, 0, 8)})"
 
   action_group_executor {
     lambda = aws_lambda_function.repo_ingestor.arn
@@ -619,7 +592,7 @@ resource "aws_bedrockagent_agent_action_group" "security_static_analyzer_action"
   agent_id          = aws_bedrockagent_agent.security_compliance_agent.id
   agent_version     = "DRAFT"
   action_group_name = "static-analyzer-action"
-  description       = "Invoke static analyzer Lambda for security and dependency analysis"
+  description       = "Invoke static analyzer Lambda for security and dependency analysis (schema ${substr(aws_s3_object.static_analyzer_openapi.etag, 0, 8)})"
 
   action_group_executor {
     lambda = aws_lambda_function.static_analyzer.arn
@@ -642,7 +615,7 @@ resource "aws_bedrockagent_agent_action_group" "yaml_validator_action" {
   agent_id          = aws_bedrockagent_agent.yaml_generator_agent.id
   agent_version     = "DRAFT"
   action_group_name = "yaml-validator-action"
-  description       = "Validate generated YAML syntax and security"
+  description       = "Validate generated YAML syntax and security (schema ${substr(aws_s3_object.template_validator_openapi.etag, 0, 8)})"
 
   action_group_executor {
     lambda = aws_lambda_function.template_validator.arn
@@ -665,7 +638,7 @@ resource "aws_bedrockagent_agent_action_group" "pr_manager_github_action" {
   agent_id          = aws_bedrockagent_agent.pr_manager_agent.id
   agent_version     = "DRAFT"
   action_group_name = "github-api-action"
-  description       = "Create GitHub PRs via API (supports draft PRs for human-in-the-loop)"
+  description       = "Create GitHub PRs via API (supports draft PRs for human-in-the-loop) (schema ${substr(aws_s3_object.github_openapi.etag, 0, 8)})"
 
   action_group_executor {
     lambda = aws_lambda_function.github_api.arn
