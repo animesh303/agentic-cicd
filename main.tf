@@ -295,6 +295,7 @@ resource "aws_lambda_function" "orchestrator" {
       TASK_TABLE_NAME               = aws_dynamodb_table.task_tracking.name
       AGENT_ALIAS_ID                = var.agent_alias_id
       STATIC_ANALYZER_FUNCTION_NAME = aws_lambda_function.static_analyzer.function_name
+      GITHUB_API_FUNCTION_NAME      = aws_lambda_function.github_api.function_name
     }
   }
   depends_on = [
@@ -512,22 +513,51 @@ resource "aws_bedrockagent_agent" "pr_manager_agent" {
   agent_resource_role_arn = aws_iam_role.bedrock_agent_role.arn
   foundation_model        = var.bedrock_foundation_model
   instruction             = <<EOF
-You are a GitHub PR manager. Create pull requests with:
-- Clear, descriptive titles (e.g., "Add CI/CD pipeline for [repo-name]")
-- Comprehensive descriptions explaining:
-  * What the pipeline does
-  * Why each stage is included
-  * Required secrets and permissions
-  * How to test the pipeline
-  * Deployment instructions
-- Proper branch naming (e.g., "ci-cd/add-pipeline" or "feature/ci-cd-pipeline")
-- IMPORTANT: Always create DRAFT PRs (draft: true) for human-in-the-loop review
-- Include the generated workflow YAML file in .github/workflows/ci-cd.yml
-- Add appropriate labels if needed
+You are a GitHub PR manager. Your task is to create pull requests with GitHub Actions workflow files.
 
-Use the GitHub API action group to create draft PRs with the generated workflow files.
-The API expects: operation="create_pr", owner, repo, title, head (branch), base (target branch), 
-draft=true, body (description), and files array with path and content.
+YOU HAVE ACCESS TO THREE OPERATIONS IN YOUR ACTION GROUP:
+1. create_branch - Creates a new branch in the repository
+2. create_file - Creates or updates files in a branch (THIS IS CRITICAL - YOU MUST USE THIS)
+3. create_pr - Creates a pull request
+
+WORKFLOW (EXECUTE IN THIS EXACT ORDER):
+
+STEP 1: Create Branch
+Call the create_branch operation with:
+- operation: "create_branch"
+- owner: (extract from repository URL)
+- repo: (extract from repository URL)
+- branch: "ci-cd/add-pipeline"
+- base_branch: "main"
+
+STEP 2: Create Workflow File (MANDATORY - DO NOT SKIP)
+After the branch is created, you MUST call the create_file operation. This is the most important step.
+Call it with:
+- operation: "create_file"
+- owner: (same as step 1)
+- repo: (same as step 1)
+- branch: "ci-cd/add-pipeline" (the branch from step 1)
+- files: [{"path": ".github/workflows/ci-cd.yml", "content": "<YAML_CONTENT_FROM_INSTRUCTIONS>", "message": "Add CI/CD pipeline workflow"}]
+
+The YAML content will be provided in the user's instructions. Extract it exactly and use it as the "content" field in the files array.
+
+STEP 3: Create PR
+After the file is created, call the create_pr operation with:
+- operation: "create_pr"
+- owner: (same as step 1)
+- repo: (same as step 1)
+- title: "Add CI/CD pipeline for [repo-name]"
+- head: "ci-cd/add-pipeline"
+- base: "main"
+- draft: true
+- body: Comprehensive description
+
+CRITICAL REQUIREMENTS:
+1. You MUST execute all 3 steps in order. DO NOT skip step 2.
+2. The create_file operation is available in your action group - you MUST use it.
+3. The file path MUST be exactly: .github/workflows/ci-cd.yml
+4. Extract YAML content from markdown code blocks if present (remove the ```yaml and ``` markers)
+5. If you cannot find the create_file operation, report an error - do not proceed without creating the file.
 
 IMPORTANT: Do not use thinking tags or chain-of-thought reasoning. Provide direct answers only.
 EOF
@@ -844,6 +874,13 @@ resource "null_resource" "prepare_agents" {
       local.agent_instruction_hashes.pr_manager,
       local.agent_instruction_hashes.feedback
     ])
+    schema_hashes = sha256(join(",", [
+      filemd5("${path.module}/openapi/github_pr_tool.yaml"),
+      filemd5("${path.module}/openapi/repo_ingestor.yaml"),
+      filemd5("${path.module}/openapi/static_analyzer.yaml"),
+      filemd5("${path.module}/openapi/template_validator.yaml"),
+      filemd5("${path.module}/openapi/agent_communication.yaml")
+    ]))
   }
 
   provisioner "local-exec" {

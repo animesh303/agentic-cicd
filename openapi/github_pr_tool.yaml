@@ -6,6 +6,125 @@ info:
 servers:
   - url: https://api.github.com
 paths:
+  /create-branch:
+    post:
+      operationId: createBranch
+      summary: Create a new branch in the repository
+      description: Create a new branch from a base branch (e.g., main or master). This is typically done before creating files and opening a PR.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - operation
+                - owner
+                - repo
+                - branch
+              properties:
+                operation:
+                  type: string
+                  enum:
+                    - create_branch
+                  description: Operation type, must be 'create_branch'
+                owner:
+                  type: string
+                  description: GitHub repository owner (username or organization)
+                repo:
+                  type: string
+                  description: Repository name
+                branch:
+                  type: string
+                  description: Name of the new branch to create
+                base_branch:
+                  type: string
+                  description: Base branch to create from (defaults to main if not provided)
+      responses:
+        "200":
+          description: Branch created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  branch:
+                    type: string
+                    description: Name of the created branch
+  /create-file:
+    post:
+      operationId: createFile
+      summary: Create or update a file in the repository
+      description: Create or update a file in a specific branch. Use this to add workflow files before creating a PR.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - operation
+                - owner
+                - repo
+                - branch
+                - files
+              properties:
+                operation:
+                  type: string
+                  enum:
+                    - create_file
+                  description: Operation type, must be 'create_file'
+                owner:
+                  type: string
+                  description: GitHub repository owner (username or organization)
+                repo:
+                  type: string
+                  description: Repository name
+                branch:
+                  type: string
+                  description: Branch name where the file should be created/updated
+                files:
+                  type: array
+                  description: Array of files to create or update
+                  items:
+                    type: object
+                    required:
+                      - path
+                      - content
+                    properties:
+                      path:
+                        type: string
+                        description: File path in repository (e.g., .github/workflows/ci-cd.yml)
+                      content:
+                        type: string
+                        description: File content
+                      message:
+                        type: string
+                        description: Commit message for this file
+      responses:
+        "200":
+          description: File(s) created/updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  files:
+                    type: array
+                    description: Array of file creation results
+                    items:
+                      type: object
+                      properties:
+                        path:
+                          type: string
+                        status:
+                          type: string
   /create-pr:
     post:
       operationId: createPR

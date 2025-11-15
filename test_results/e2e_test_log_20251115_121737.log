@@ -1,0 +1,64 @@
+
+==========================================
+Prerequisites Check
+==========================================
+[0;32m✓[0m AWS CLI installed
+[0;32m✓[0m AWS credentials configured (Account: 027378719919)
+[0;32m✓[0m Terraform installed (version: 1.9.8)
+[0;32m✓[0m Terraform outputs available
+[0;32m✓[0m jq installed (for JSON processing)
+
+==========================================
+Lambda Function Tests
+==========================================
+[0;34mℹ[0m Testing Repository Ingestor Lambda...
+[0;32m✓[0m Repository Ingestor Lambda responded successfully
+[0;34mℹ[0m Testing Static Analyzer Lambda...
+[0;32m✓[0m Static Analyzer Lambda responded successfully
+[0;34mℹ[0m Testing Template Validator Lambda...
+[0;32m✓[0m Template Validator Lambda responded successfully
+
+==========================================
+Bedrock Agent Tests
+==========================================
+[1;33m⚠[0m AWS CLI 'invoke-agent' command not available in this AWS CLI version
+[0;34mℹ[0m This is expected - AWS CLI may not support invoke-agent yet
+[0;34mℹ[0m Agents will be tested via orchestrator workflow (uses boto3 SDK)
+
+==========================================
+DynamoDB Tests
+==========================================
+[0;32m✓[0m DynamoDB table exists: bedrock-ci-agent-tasks
+[0;32m✓[0m DynamoDB write operation successful
+
+==========================================
+S3 Bucket Tests
+==========================================
+[0;32m✓[0m S3 bucket exists: bedrock-ci-agent-templates-12345
+[0;32m✓[0m OpenAPI specs found in S3
+
+==========================================
+End-to-End Workflow Test
+==========================================
+[0;34mℹ[0m Invoking orchestrator with task ID: e2e-test-1763189314
+[0;34mℹ[0m Repository: https://github.com/animesh303/animesh303 (branch: main)
+[0;34mℹ[0m Note: This test may take 5-15 minutes to complete...
+
+Read timeout on endpoint URL: "https://lambda.us-east-1.amazonaws.com/2015-03-31/functions/bedrock-ci-agent-orchestrator/invocations"
+[1;33m⚠[0m Lambda response shows error: Repository scanning failed (will verify with DynamoDB)
+[0;34mℹ[0m Checking DynamoDB for task record...
+[0;34mℹ[0m Task status in DynamoDB: completed
+[0;34mℹ[0m Final task status in DynamoDB: completed
+[0;34mℹ[0m Task completed successfully according to DynamoDB (Lambda response may have been from early failure)
+[0;32m✓[0m End-to-end workflow completed successfully (verified via DynamoDB, duration: 183s)
+[0;34mℹ[0m Workflow steps completed: 6
+[0;32m✓[0m   Step 1: repo_scanner - SUCCESS
+[0;32m✓[0m   Step 2: static_analyzer - SUCCESS
+[0;32m✓[0m   Step 3: pipeline_designer - SUCCESS
+[0;32m✓[0m   Step 4: security_compliance - SUCCESS
+[0;32m✓[0m   Step 5: yaml_generator - SUCCESS
+[1;33m⚠[0m   Step 6: pr_manager - error
+
+==========================================
+Test Summary
+==========================================

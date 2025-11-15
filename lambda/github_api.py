@@ -120,11 +120,29 @@ def create_pull_request(
         }
 
         response = requests.post(url, headers=headers, json=data)
+
+        # Handle 422 errors specifically (validation errors from GitHub)
+        if response.status_code == 422:
+            error_data = response.json()
+            error_message = error_data.get("message", "Validation failed")
+            errors = error_data.get("errors", [])
+            if errors:
+                error_details = "; ".join([str(e) for e in errors])
+                error_message = f"{error_message}: {error_details}"
+            raise Exception(f"GitHub API validation error: {error_message}")
+
         response.raise_for_status()
         return response.json()
+    except requests.exceptions.HTTPError as e:
+        error_msg = f"HTTP error creating PR: {e}"
+        if hasattr(e.response, "text"):
+            error_msg += f" - Response: {e.response.text[:200]}"
+        print(f"Error creating PR: {error_msg}")
+        raise Exception(error_msg)
     except Exception as e:
-        print(f"Error creating PR: {e}")
-        raise
+        error_msg = f"Error creating PR: {str(e)}"
+        print(error_msg)
+        raise Exception(error_msg)
 
 
 def lambda_handler(event, context):
@@ -437,10 +455,43 @@ def lambda_handler(event, context):
             # Create files first if provided
             branch = head
 
-            if files:
-                # Ensure branch exists
-                create_branch(owner, repo, base, branch, token)
+            # Always ensure branch exists before creating PR
+            # This prevents 422 errors when the branch doesn't exist
+            branch_created = create_branch(owner, repo, base, branch, token)
+            if not branch_created:
+                # Try to check if branch already exists
+                try:
+                    url = f"https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{branch}"
+                    headers = {
+                        "Authorization": f"token {token}",
+                        "Accept": "application/vnd.github.v3+json",
+                    }
+                    response = requests.get(url, headers=headers)
+                    if response.status_code != 200:
+                        error_response = {
+                            "status": "error",
+                            "message": f"Failed to create or verify branch '{branch}'. Branch may not exist and could not be created from '{base}'.",
+                        }
+                        if action_group:
+                            return {
+                                "messageVersion": "1.0",
+                                "response": {
+                                    "actionGroup": action_group,
+                                    "apiPath": api_path or "/create-pr",
+                                    "httpMethod": http_method or "POST",
+                                    "httpStatusCode": 400,
+                                    "responseBody": {
+                                        "application/json": {
+                                            "body": json.dumps(error_response)
+                                        }
+                                    },
+                                },
+                            }
+                        return error_response
+                except Exception as e:
+                    print(f"Warning: Could not verify branch existence: {e}")
 
+            if files:
                 # Create/update files
                 for file_info in files:
                     path = file_info.get("path")
