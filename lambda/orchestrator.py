@@ -311,6 +311,10 @@ def execute_github_workflow(
                 "operations": operations,
             }
 
+        # Generate unique commit message with timestamp
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+        commit_message = f"Add CI/CD pipeline workflow - Generated at {timestamp}"
+        
         file_payload = {
             "operation": "create_file",
             "owner": owner,
@@ -320,7 +324,7 @@ def execute_github_workflow(
                 {
                     "path": ".github/workflows/ci-cd.yml",
                     "content": yaml_content,
-                    "message": "Add CI/CD pipeline workflow",
+                    "message": commit_message,
                 }
             ],
         }
@@ -711,7 +715,9 @@ Return ONLY the workflow inside a ```yaml code fence followed immediately by the
 
         # Step 6: PR Manager Agent (documentation only)
         pr_body = ""
-        pr_title = f"Add CI/CD pipeline for {repo_name}"
+        # Generate unique PR title with timestamp
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+        pr_title = f"Add CI/CD pipeline for {repo_name} - Generated at {timestamp}"
         if "pr_manager" in agent_ids:
             session_id = f"{task_id}-pr-manager"
             pipeline_summary = (
@@ -749,6 +755,10 @@ Return Markdown with sections: Summary, Testing / Validation, Required Secrets &
             )
             workflow_steps.append({"step": "pr_manager", "result": result})
             pr_body = result.get("completion", "").strip()
+            # Add timestamp to agent-generated PR body for uniqueness
+            if pr_body:
+                pr_body_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+                pr_body = f"{pr_body}\n\n---\n**Generated at:** {pr_body_timestamp}"
             # Update DynamoDB with current progress
             update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
@@ -758,22 +768,26 @@ Return Markdown with sections: Summary, Testing / Validation, Required Secrets &
                 )
 
         if not pr_body:
+            # Generate unique PR body with timestamp
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
             pr_body = (
-                "## Summary\n"
-                "Adds an automated CI/CD workflow covering validation, security scanning, planning, deployment, and drift checks.\n\n"
-                "## Testing / Validation\n"
-                "- Trigger workflow on a PR and review tfsec/checkov/infracost outputs.\n"
-                "- Run `terraform plan` locally before merging.\n\n"
-                "## Required Secrets / IAM\n"
-                "- AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY with least-privilege Terraform access.\n"
-                "- INFRACOST_API_KEY for cost estimation.\n\n"
-                "## Deployment / Rollback\n"
-                "- Workflow deploys from `main` with approvals.\n"
-                "- Revert by rolling back `.github/workflows/ci-cd.yml` if needed."
+                f"## Summary\n"
+                f"Adds an automated CI/CD workflow covering validation, security scanning, planning, deployment, and drift checks.\n\n"
+                f"**Generated at:** {timestamp}\n\n"
+                f"## Testing / Validation\n"
+                f"- Trigger workflow on a PR and review tfsec/checkov/infracost outputs.\n"
+                f"- Run `terraform plan` locally before merging.\n\n"
+                f"## Required Secrets / IAM\n"
+                f"- AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY with least-privilege Terraform access.\n"
+                f"- INFRACOST_API_KEY for cost estimation.\n\n"
+                f"## Deployment / Rollback\n"
+                f"- Workflow deploys from `main` with approvals.\n"
+                f"- Revert by rolling back `.github/workflows/ci-cd.yml` if needed."
             )
 
         if yaml_content:
-            github_branch = "ci-cd/add-pipeline"
+            # Use consistent branch name for CI/CD generation
+            github_branch = "gen-ai/cicd-generation"
             github_result = execute_github_workflow(
                 repo_owner,
                 repo_name,
