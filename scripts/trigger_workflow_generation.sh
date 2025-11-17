@@ -332,63 +332,114 @@ poll_task_progress() {
             echo -e "Elapsed:     ${YELLOW}${elapsed_min}m ${elapsed_sec}s${NC}"
             echo ""
             
-            # Parse and display workflow steps
-            if [ "$task_result" != "{}" ] && [ "$task_result" != "null" ] && [ -n "$task_result" ]; then
-                if [ "$HAS_JQ" = true ]; then
-                    local steps_json=$(echo "$task_result" | jq '.steps // []' 2>/dev/null || echo "[]")
-                    local step_count=$(echo "$steps_json" | jq 'length' 2>/dev/null || echo "0")
-                else
-                    # Fallback without jq - try to count steps manually
-                    local step_count=$(echo "$task_result" | grep -o '"step"' | wc -l 2>/dev/null || echo "0")
-                    local steps_json="[]"
-                fi
+            # Always show all workflow steps with their status
+            # Expected workflow steps in order
+            local expected_steps=(
+                "repo_ingestor"
+                "repo_scanner"
+                "static_analyzer"
+                "pipeline_designer"
+                "security_compliance"
+                "yaml_generator_attempt_1"
+                "yaml_generator_attempt_2"
+                "template_validator"
+                "pr_manager"
+                "github_operations"
+            )
+            
+            # Parse completed steps from DynamoDB
+            local completed_steps_map=""
+            local current_running_step=""
+            
+            if [ "$task_result" != "{}" ] && [ "$task_result" != "null" ] && [ -n "$task_result" ] && [ "$HAS_JQ" = true ]; then
+                local steps_json=$(echo "$task_result" | jq '.steps // []' 2>/dev/null || echo "[]")
+                local step_count=$(echo "$steps_json" | jq 'length' 2>/dev/null || echo "0")
                 
-                if [ "$step_count" -gt 0 ] && [ "$HAS_JQ" = true ]; then
-                    # Determine currently running agent
-                    local completed_step_names=$(echo "$steps_json" | jq -r '.[].step' 2>/dev/null || echo "")
-                    local next_step=$(get_next_step "$completed_step_names")
-                    local current_agent=""
-                    
-                    if [ -n "$next_step" ]; then
-                        current_agent=$(get_agent_name "$next_step")
-                    fi
-                    
-                    # Show currently running agent
-                    if [ -n "$current_agent" ] && [ "$task_status" = "in_progress" ]; then
-                        echo -e "${CYAN}Currently Running:${NC}"
-                        echo -e "  ${YELLOW}→${NC} ${CYAN}$current_agent${NC}"
-                        echo ""
-                    fi
-                    
-                    # Display completed steps
-                    echo -e "${BLUE}Completed Steps:${NC}"
+                if [ "$step_count" -gt 0 ]; then
+                    # Build a map of completed steps and their status
                     for i in $(seq 0 $((step_count - 1))); do
                         local step_name=$(echo "$steps_json" | jq -r ".[$i].step // \"unknown\"" 2>/dev/null || echo "unknown")
                         local step_result=$(echo "$steps_json" | jq -r ".[$i].result // {}" 2>/dev/null || echo "{}")
                         local step_status=$(echo "$step_result" | jq -r '.status // "unknown"' 2>/dev/null || echo "unknown")
-                        local agent_name=$(get_agent_name "$step_name")
-                        
-                        case "$step_status" in
-                            "success")
-                                echo -e "  ${GREEN}✓${NC} $agent_name"
-                                ;;
-                            "error")
-                                echo -e "  ${RED}✗${NC} $agent_name ${RED}(failed)${NC}"
-                                ;;
-                            *)
-                                echo -e "  ${YELLOW}○${NC} $agent_name ${YELLOW}(in progress)${NC}"
-                                ;;
-                        esac
+                        completed_steps_map="${completed_steps_map}${step_name}:${step_status} "
                     done
-                elif [ "$step_count" -gt 0 ]; then
-                    echo -e "${BLUE}Completed Steps:${NC} ${step_count} step(s)"
-                    echo -e "${YELLOW}(Install jq for detailed step information)${NC}"
-                else
-                    echo -e "${YELLOW}Waiting for workflow to start...${NC}"
                 fi
-            else
-                echo -e "${YELLOW}Initializing workflow...${NC}"
             fi
+            
+            # Determine which step is currently running
+            if [ "$task_status" = "in_progress" ]; then
+                for step in "${expected_steps[@]}"; do
+                    # Check if this step is completed
+                    local step_completed=false
+                    local step_status=""
+                    
+                    if [ -n "$completed_steps_map" ]; then
+                        for completed in $completed_steps_map; do
+                            local completed_step=$(echo "$completed" | cut -d':' -f1)
+                            if [ "$completed_step" = "$step" ]; then
+                                step_completed=true
+                                step_status=$(echo "$completed" | cut -d':' -f2)
+                                break
+                            fi
+                        done
+                    fi
+                    
+                    # If step is not completed or status is not success, it might be running
+                    if [ "$step_completed" = false ] || [ "$step_status" != "success" ]; then
+                        current_running_step="$step"
+                        break
+                    fi
+                done
+            fi
+            
+            # Show currently running agent
+            if [ -n "$current_running_step" ] && [ "$task_status" = "in_progress" ]; then
+                local current_agent=$(get_agent_name "$current_running_step")
+                echo -e "${CYAN}Currently Running:${NC}"
+                echo -e "  ${YELLOW}→${NC} ${CYAN}$current_agent${NC}"
+                echo ""
+            fi
+            
+            # Display all workflow steps with their status
+            echo -e "${BLUE}Workflow Steps:${NC}"
+            for step in "${expected_steps[@]}"; do
+                local agent_name=$(get_agent_name "$step")
+                local step_status="pending"
+                local step_found=false
+                
+                # Check if this step is in completed steps
+                if [ -n "$completed_steps_map" ]; then
+                    for completed in $completed_steps_map; do
+                        local completed_step=$(echo "$completed" | cut -d':' -f1)
+                        if [ "$completed_step" = "$step" ]; then
+                            step_found=true
+                            step_status=$(echo "$completed" | cut -d':' -f2)
+                            break
+                        fi
+                    done
+                fi
+                
+                # Determine display based on status
+                if [ "$step_found" = true ]; then
+                    case "$step_status" in
+                        "success")
+                            echo -e "  ${GREEN}✓${NC} $agent_name"
+                            ;;
+                        "error")
+                            echo -e "  ${RED}✗${NC} $agent_name ${RED}(failed)${NC}"
+                            ;;
+                        *)
+                            echo -e "  ${YELLOW}○${NC} $agent_name ${YELLOW}(in progress)${NC}"
+                            ;;
+                    esac
+                elif [ "$step" = "$current_running_step" ] && [ "$task_status" = "in_progress" ]; then
+                    # This is the currently running step
+                    echo -e "  ${CYAN}→${NC} $agent_name ${CYAN}(running)${NC}"
+                else
+                    # Step hasn't started yet
+                    echo -e "  ${BLUE}○${NC} $agent_name ${BLUE}(pending)${NC}"
+                fi
+            done
             
             echo ""
             echo -e "${BLUE}==============================================================${NC}"

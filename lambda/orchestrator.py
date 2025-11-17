@@ -422,6 +422,8 @@ def lambda_handler(event, context):
             workflow_steps.append(
                 {"step": "repo_ingestor", "result": repo_ingestion_result}
             )
+            # Update DynamoDB with current progress
+            update_task_status(task_id, "in_progress", {"steps": workflow_steps})
             if repo_ingestion_result.get("status") != "success":
                 print(
                     f"Warning: Repo ingestor returned status {repo_ingestion_result.get('status')}: {repo_ingestion_result.get('message', 'no message')}"
@@ -462,6 +464,8 @@ Return a structured JSON summary with all findings. If the manifest data is inco
                 agent_ids["repo_scanner"], AGENT_ALIAS_ID, session_id, input_text
             )
             workflow_steps.append({"step": "repo_scanner", "result": result})
+            # Update DynamoDB with current progress
+            update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
             if result.get("status") != "success":
                 update_task_status(
@@ -491,6 +495,8 @@ Return a structured JSON summary with all findings. If the manifest data is inco
             workflow_steps.append(
                 {"step": "static_analyzer", "result": static_analyzer_result}
             )
+            # Update DynamoDB with current progress
+            update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
             if static_analyzer_result.get("status") != "success":
                 error_msg = static_analyzer_result.get("message", "Unknown error")
@@ -524,6 +530,8 @@ Return a structured JSON summary with all findings. If the manifest data is inco
             )
             workflow_steps.append({"step": "pipeline_designer", "result": result})
             pipeline_design_result = result
+            # Update DynamoDB with current progress
+            update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
         # Step 4: Security & Compliance Agent
         if "security_compliance" in agent_ids:
@@ -554,6 +562,8 @@ Use the static analyzer results below together with the pipeline design to ensur
             )
             workflow_steps.append({"step": "security_compliance", "result": result})
             security_recommendations = result.get("completion", "")
+            # Update DynamoDB with current progress
+            update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
             if result.get("status") != "success":
                 print(
@@ -595,6 +605,8 @@ Return ONLY the workflow inside a ```yaml code fence followed immediately by the
                 workflow_steps.append(
                     {"step": f"yaml_generator_attempt_{attempt}", "result": result}
                 )
+                # Update DynamoDB with current progress
+                update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
                 if result.get("status") != "success":
                     if attempt == max_yaml_attempts:
@@ -664,6 +676,8 @@ Return ONLY the workflow inside a ```yaml code fence followed immediately by the
                 workflow_steps.append(
                     {"step": "template_validator", "result": validator_result}
                 )
+                # Update DynamoDB with current progress
+                update_task_status(task_id, "in_progress", {"steps": workflow_steps})
                 if not validator_result.get("valid", False):
                     summary_errors = (
                         validator_result.get("summary", {}).get("errors")
@@ -735,6 +749,8 @@ Return Markdown with sections: Summary, Testing / Validation, Required Secrets &
             )
             workflow_steps.append({"step": "pr_manager", "result": result})
             pr_body = result.get("completion", "").strip()
+            # Update DynamoDB with current progress
+            update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
             if not pr_body:
                 print(
@@ -773,6 +789,8 @@ Return Markdown with sections: Summary, Testing / Validation, Required Secrets &
             workflow_steps.append(
                 {"step": "github_operations", "result": github_result}
             )
+            # Update DynamoDB with current progress (final step)
+            update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
             if not github_result.get("success"):
                 update_task_status(
