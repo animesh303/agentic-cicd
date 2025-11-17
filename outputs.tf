@@ -63,11 +63,11 @@ output "bedrock_agent_feedback_id" {
 # Agent IDs map for orchestrator
 output "agent_ids_map" {
   value = {
-    repo_scanner      = aws_bedrockagent_agent.repo_scanner_agent.id
-    pipeline_designer = aws_bedrockagent_agent.pipeline_designer_agent.id
+    repo_scanner        = aws_bedrockagent_agent.repo_scanner_agent.id
+    pipeline_designer   = aws_bedrockagent_agent.pipeline_designer_agent.id
     security_compliance = aws_bedrockagent_agent.security_compliance_agent.id
-    yaml_generator    = aws_bedrockagent_agent.yaml_generator_agent.id
-    pr_manager        = aws_bedrockagent_agent.pr_manager_agent.id
-    feedback          = aws_bedrockagent_agent.feedback_agent.id
+    yaml_generator      = aws_bedrockagent_agent.yaml_generator_agent.id
+    pr_manager          = aws_bedrockagent_agent.pr_manager_agent.id
+    feedback            = aws_bedrockagent_agent.feedback_agent.id
   }
 }

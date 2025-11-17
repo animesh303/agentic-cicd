@@ -21,6 +21,9 @@ TEST_RESULTS_FILE="${TEST_RESULTS_DIR}/e2e_test_results_${TIMESTAMP}.json"
 TEST_LOG_FILE="${TEST_RESULTS_DIR}/e2e_test_log_${TIMESTAMP}.log"
 WORKFLOW_BRANCH="${WORKFLOW_BRANCH:-ci-cd/add-pipeline}"
 WORKFLOW_FILE_PATH="${WORKFLOW_FILE_PATH:-.github/workflows/ci-cd.yml}"
+# Allow long-running Lambda invocations (default CLI read timeout is only 60s)
+CLI_READ_TIMEOUT="${CLI_READ_TIMEOUT:-1200}"
+CLI_CONNECT_TIMEOUT="${CLI_CONNECT_TIMEOUT:-60}"
 
 REPO_OWNER=""
 REPO_NAME=""
@@ -322,19 +325,93 @@ check_invoke_agent_available() {
     return 1
 }
 
+# Test Bedrock Agent using Python/boto3 (fallback when AWS CLI doesn't support invoke-agent)
+# Parameters are passed via environment variables: PYTHON_AGENT_ID, PYTHON_AGENT_NAME, PYTHON_PROMPT, PYTHON_AGENT_ALIAS_ID
+test_agent_with_python() {
+    python3 <<PYTHON_SCRIPT
+import json
+import sys
+import uuid
+import boto3
+from botocore.config import Config
+import os
+
+try:
+    # Get parameters from environment (set by bash)
+    agent_id = os.environ.get("PYTHON_AGENT_ID")
+    agent_name = os.environ.get("PYTHON_AGENT_NAME")
+    prompt = os.environ.get("PYTHON_PROMPT")
+    agent_alias_id = os.environ.get("PYTHON_AGENT_ALIAS_ID", "TSTALIASID")
+    aws_region = os.environ.get("AWS_REGION", "us-east-1")
+    
+    if not agent_id or not prompt:
+        raise ValueError("Missing required parameters: agent_id and prompt")
+    
+    # Configure Bedrock client with appropriate timeouts
+    bedrock_config = Config(
+        read_timeout=60,
+        connect_timeout=10,
+        retries={"max_attempts": 1, "mode": "standard"},
+    )
+    
+    bedrock_client = boto3.client(
+        "bedrock-agent-runtime", 
+        region_name=aws_region, 
+        config=bedrock_config
+    )
+    
+    session_id = f"e2e-test-{agent_name}-{uuid.uuid4().hex[:8]}"
+    
+    # Invoke agent
+    response = bedrock_client.invoke_agent(
+        agentId=agent_id,
+        agentAliasId=agent_alias_id,
+        sessionId=session_id,
+        inputText=prompt,
+    )
+    
+    # Read streaming response
+    completion = []
+    chunk_count = 0
+    for event in response["completion"]:
+        if "chunk" in event and "bytes" in event["chunk"]:
+            completion.append(event["chunk"]["bytes"].decode("utf-8"))
+            chunk_count += 1
+    
+    result = {
+        "status": "success",
+        "session_id": session_id,
+        "completion_length": len("".join(completion)),
+        "chunk_count": chunk_count,
+        "has_response": len(completion) > 0
+    }
+    
+    print(json.dumps(result))
+    sys.exit(0)
+    
+except Exception as e:
+    error_result = {
+        "status": "error",
+        "error": str(e),
+        "error_type": type(e).__name__
+    }
+    print(json.dumps(error_result), file=sys.stderr)
+    sys.exit(1)
+PYTHON_SCRIPT
+    PYTHON_STATUS=$?
+    return $PYTHON_STATUS
+}
+
 # Test Bedrock Agents
 test_bedrock_agents() {
     log_section "Bedrock Agent Tests"
     
-    # Check if invoke-agent command is available
-    # Note: AWS CLI may not have invoke-agent command even in latest versions
-    # This is a known limitation - the orchestrator uses boto3 which works correctly
-    if ! check_invoke_agent_available; then
-        log_warn "AWS CLI 'invoke-agent' command not available in this AWS CLI version"
-        log_info "This is expected - AWS CLI may not support invoke-agent yet"
-        log_info "Agents will be tested via orchestrator workflow (uses boto3 SDK)"
-        add_test_result "component_tests" "agent_repo_scanner" "skip" "invoke-agent command not available in AWS CLI" "{\"note\": \"AWS CLI limitation - agents tested via orchestrator workflow using boto3\"}"
-        return 0
+    # Get AWS region from Terraform or environment (for Python script)
+    if [ -z "$AWS_REGION" ]; then
+        AWS_REGION=$(terraform output -raw aws_region 2>/dev/null || \
+                     aws configure get region 2>/dev/null || \
+                     echo "us-east-1")
+        export AWS_REGION
     fi
     
     # Get agent IDs from Terraform
@@ -346,44 +423,123 @@ test_bedrock_agents() {
         return 1
     fi
     
+    # Get agent alias ID from Terraform (default to TSTALIASID)
+    AGENT_ALIAS_ID=$(terraform output -raw agent_alias_id 2>/dev/null || echo "TSTALIASID")
+    if [ -z "$AGENT_ALIAS_ID" ] || [ "$AGENT_ALIAS_ID" = "null" ]; then
+        AGENT_ALIAS_ID="TSTALIASID"
+    fi
+    
+    # Check if invoke-agent command is available
+    USE_AWS_CLI=false
+    if check_invoke_agent_available; then
+        USE_AWS_CLI=true
+        log_info "Using AWS CLI for agent testing"
+    else
+        log_info "AWS CLI 'invoke-agent' command not available, using Python/boto3 instead"
+    fi
+    
     # Test Repo Scanner Agent
     REPO_SCANNER_ID=$(echo "$AGENT_IDS" | jq -r '.repo_scanner // empty' 2>/dev/null || echo "")
     if [ -n "$REPO_SCANNER_ID" ] && [ "$REPO_SCANNER_ID" != "null" ]; then
         log_info "Testing Repo Scanner Agent..."
-        SESSION_ID="e2e-test-repo-scanner-$(date +%s)"
+        PROMPT="Analyze repository: $TEST_REPO_URL (branch: $TEST_BRANCH). Extract all manifest files, detect languages, frameworks, and infrastructure components."
         
-        # Try bedrock-agent-runtime invoke-agent
-        # Note: This command may not be available in AWS CLI - that's OK, agents are tested via orchestrator
-        if run_with_timeout 60 aws bedrock-agent-runtime invoke-agent \
-            --agent-id "$REPO_SCANNER_ID" \
-            --agent-alias-id "TSTALIASID" \
-            --session-id "$SESSION_ID" \
-            --input-text "Analyze repository: $TEST_REPO_URL (branch: $TEST_BRANCH). Extract all manifest files, detect languages, frameworks, and infrastructure components." \
-            /tmp/repo_scanner_response.json > /tmp/agent_output.log 2>&1; then
-            
-            # Check if response file was created and has content
-            if [ -f /tmp/repo_scanner_response.json ] && [ -s /tmp/repo_scanner_response.json ]; then
-                log_pass "Repo Scanner Agent responded"
-                add_test_result "component_tests" "agent_repo_scanner" "pass" "Agent responded successfully" "{\"session_id\": \"$SESSION_ID\"}"
+        if [ "$USE_AWS_CLI" = "true" ]; then
+            # Use AWS CLI if available
+            SESSION_ID="e2e-test-repo-scanner-$(date +%s)"
+            if run_with_timeout 60 aws bedrock-agent-runtime invoke-agent \
+                --agent-id "$REPO_SCANNER_ID" \
+                --agent-alias-id "$AGENT_ALIAS_ID" \
+                --session-id "$SESSION_ID" \
+                --input-text "$PROMPT" \
+                /tmp/repo_scanner_response.json > /tmp/agent_output.log 2>&1; then
+                
+                if [ -f /tmp/repo_scanner_response.json ] && [ -s /tmp/repo_scanner_response.json ]; then
+                    log_pass "Repo Scanner Agent responded"
+                    add_test_result "component_tests" "agent_repo_scanner" "pass" "Agent responded successfully" "{\"session_id\": \"$SESSION_ID\", \"method\": \"aws_cli\"}"
+                else
+                    log_warn "Repo Scanner Agent response file not created or empty"
+                    add_test_result "component_tests" "agent_repo_scanner" "warn" "Response file not created or empty" "{}"
+                fi
             else
-                log_warn "Repo Scanner Agent response file not created or empty"
-                add_test_result "component_tests" "agent_repo_scanner" "warn" "Response file not created or empty" "{}"
+                ERROR_OUTPUT=$(cat /tmp/agent_output.log 2>/dev/null || echo "")
+                log_warn "AWS CLI invocation failed, trying Python/boto3 fallback"
+                USE_AWS_CLI=false
             fi
-        else
-            # Check the error output
-            ERROR_OUTPUT=$(cat /tmp/agent_output.log 2>/dev/null || echo "")
-            if echo "$ERROR_OUTPUT" | grep -q "Invalid choice\|Invalid choice"; then
-                log_warn "AWS CLI version may not support invoke-agent command"
-                log_info "Update AWS CLI: pip install --upgrade awscli or brew upgrade awscli"
-                add_test_result "component_tests" "agent_repo_scanner" "warn" "AWS CLI version may not support invoke-agent" "{\"note\": \"Update AWS CLI to latest version\"}"
+        fi
+        
+        # Use Python/boto3 (either as primary method or fallback)
+        if [ "$USE_AWS_CLI" = "false" ]; then
+            log_info "Testing Repo Scanner Agent using Python/boto3..."
+            export PYTHON_AGENT_ID="$REPO_SCANNER_ID"
+            export PYTHON_AGENT_NAME="repo-scanner"
+            export PYTHON_PROMPT="$PROMPT"
+            export PYTHON_AGENT_ALIAS_ID="$AGENT_ALIAS_ID"
+            PYTHON_RESULT=$(test_agent_with_python 2>&1)
+            PYTHON_STATUS=$?
+            unset PYTHON_AGENT_ID PYTHON_AGENT_NAME PYTHON_PROMPT PYTHON_AGENT_ALIAS_ID
+            
+            if [ $PYTHON_STATUS -eq 0 ]; then
+                RESULT_STATUS=$(echo "$PYTHON_RESULT" | jq -r '.status // "unknown"' 2>/dev/null || echo "unknown")
+                if [ "$RESULT_STATUS" = "success" ]; then
+                    COMPLETION_LEN=$(echo "$PYTHON_RESULT" | jq -r '.completion_length // 0' 2>/dev/null || echo "0")
+                    SESSION_ID=$(echo "$PYTHON_RESULT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
+                    if [ "$COMPLETION_LEN" -gt 0 ]; then
+                        log_pass "Repo Scanner Agent responded successfully (Python/boto3)"
+                        add_test_result "component_tests" "agent_repo_scanner" "pass" "Agent responded successfully" "{\"session_id\": \"$SESSION_ID\", \"method\": \"python_boto3\", \"completion_length\": $COMPLETION_LEN}"
+                    else
+                        log_warn "Repo Scanner Agent responded but completion was empty"
+                        add_test_result "component_tests" "agent_repo_scanner" "warn" "Agent responded but completion was empty" "{\"session_id\": \"$SESSION_ID\", \"method\": \"python_boto3\"}"
+                    fi
+                else
+                    ERROR_MSG=$(echo "$PYTHON_RESULT" | jq -r '.error // "Unknown error"' 2>/dev/null || echo "Unknown error")
+                    log_warn "Repo Scanner Agent test failed: $ERROR_MSG"
+                    add_test_result "component_tests" "agent_repo_scanner" "warn" "Agent test failed" "{\"error\": \"$ERROR_MSG\", \"method\": \"python_boto3\"}"
+                fi
             else
-                log_warn "Repo Scanner Agent test timed out or failed (this may be normal for long-running agents)"
-                add_test_result "component_tests" "agent_repo_scanner" "warn" "Agent test timed out or failed" "{}"
+                ERROR_MSG=$(echo "$PYTHON_RESULT" | tail -1)
+                log_warn "Repo Scanner Agent test failed: $ERROR_MSG"
+                add_test_result "component_tests" "agent_repo_scanner" "warn" "Agent test failed" "{\"error\": \"$ERROR_MSG\", \"method\": \"python_boto3\"}"
             fi
         fi
     else
         log_fail "Repo Scanner Agent ID not found"
         add_test_result "component_tests" "agent_repo_scanner" "fail" "Agent ID not found" "{}"
+    fi
+    
+    # Test at least one more agent to verify the system works
+    PIPELINE_DESIGNER_ID=$(echo "$AGENT_IDS" | jq -r '.pipeline_designer // empty' 2>/dev/null || echo "")
+    if [ -n "$PIPELINE_DESIGNER_ID" ] && [ "$PIPELINE_DESIGNER_ID" != "null" ]; then
+        log_info "Testing Pipeline Designer Agent..."
+        PROMPT="Design a CI/CD pipeline for a Python application with tests and Docker."
+        
+        if [ "$USE_AWS_CLI" = "false" ]; then
+            export PYTHON_AGENT_ID="$PIPELINE_DESIGNER_ID"
+            export PYTHON_AGENT_NAME="pipeline-designer"
+            export PYTHON_PROMPT="$PROMPT"
+            export PYTHON_AGENT_ALIAS_ID="$AGENT_ALIAS_ID"
+            PYTHON_RESULT=$(test_agent_with_python 2>&1)
+            PYTHON_STATUS=$?
+            unset PYTHON_AGENT_ID PYTHON_AGENT_NAME PYTHON_PROMPT PYTHON_AGENT_ALIAS_ID
+            
+            if [ $PYTHON_STATUS -eq 0 ]; then
+                RESULT_STATUS=$(echo "$PYTHON_RESULT" | jq -r '.status // "unknown"' 2>/dev/null || echo "unknown")
+                if [ "$RESULT_STATUS" = "success" ]; then
+                    COMPLETION_LEN=$(echo "$PYTHON_RESULT" | jq -r '.completion_length // 0' 2>/dev/null || echo "0")
+                    if [ "$COMPLETION_LEN" -gt 0 ]; then
+                        log_pass "Pipeline Designer Agent responded successfully"
+                        add_test_result "component_tests" "agent_pipeline_designer" "pass" "Agent responded successfully" "{\"method\": \"python_boto3\", \"completion_length\": $COMPLETION_LEN}"
+                    else
+                        log_warn "Pipeline Designer Agent responded but completion was empty"
+                        add_test_result "component_tests" "agent_pipeline_designer" "warn" "Agent responded but completion was empty" "{\"method\": \"python_boto3\"}"
+                    fi
+                else
+                    ERROR_MSG=$(echo "$PYTHON_RESULT" | jq -r '.error // "Unknown error"' 2>/dev/null || echo "Unknown error")
+                    log_warn "Pipeline Designer Agent test failed: $ERROR_MSG"
+                    add_test_result "component_tests" "agent_pipeline_designer" "warn" "Agent test failed" "{\"error\": \"$ERROR_MSG\"}"
+                fi
+            fi
+        fi
     fi
 }
 
@@ -606,6 +762,8 @@ test_end_to_end_workflow() {
     if timeout 1200 aws lambda invoke \
         --function-name "$LAMBDA_ORCHESTRATOR" \
         --cli-binary-format raw-in-base64-out \
+        --cli-read-timeout "$CLI_READ_TIMEOUT" \
+        --cli-connect-timeout "$CLI_CONNECT_TIMEOUT" \
         --payload "$PAYLOAD" \
         /tmp/orchestrator_response.json 2>&1 | tee -a "$TEST_LOG_FILE"; then
         

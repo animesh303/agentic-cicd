@@ -19,17 +19,17 @@ WARNINGS=0
 # Logging functions
 log_pass() {
     echo -e "${GREEN}✓${NC} $1"
-    ((PASSED++))
+    PASSED=$((PASSED + 1))
 }
 
 log_fail() {
     echo -e "${RED}✗${NC} $1"
-    ((FAILED++))
+    FAILED=$((FAILED + 1))
 }
 
 log_warn() {
     echo -e "${YELLOW}⚠${NC} $1"
-    ((WARNINGS++))
+    WARNINGS=$((WARNINGS + 1))
 }
 
 log_info() {
@@ -52,7 +52,25 @@ check_terraform() {
         exit 1
     fi
     
-    TERRAFORM_VERSION=$(terraform version -json | jq -r '.terraform_version')
+    # Get Terraform version (handle both JSON and plain text output)
+    # Temporarily disable exit on error for command substitution
+    set +e
+    if command -v jq &> /dev/null; then
+        TERRAFORM_VERSION=$(terraform version -json 2>/dev/null | jq -r '.terraform_version' 2>/dev/null || true)
+    fi
+    
+    # Fallback to plain version if jq fails or is not available
+    if [ -z "$TERRAFORM_VERSION" ] || [ "$TERRAFORM_VERSION" = "null" ]; then
+        TERRAFORM_VERSION=$(terraform version 2>/dev/null | head -n 1 | sed 's/Terraform v//' 2>/dev/null || echo "unknown")
+        if [ -z "$TERRAFORM_VERSION" ]; then
+            TERRAFORM_VERSION="unknown"
+        fi
+    fi
+    # Ensure we have a version before re-enabling exit on error
+    TERRAFORM_VERSION="${TERRAFORM_VERSION:-unknown}"
+    true  # Ensure last command succeeds before re-enabling set -e
+    set -e
+    
     log_pass "Terraform is installed (version: $TERRAFORM_VERSION)"
 }
 
