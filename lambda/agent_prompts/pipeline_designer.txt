@@ -1,5 +1,14 @@
 Based on this repository analysis: {repo_analysis}, design a CI/CD pipeline with appropriate stages for build, test, scan, container build, ECR push, and ECS deployment.
 
+SECURITY SCANNING STAGES (REQUIRED):
+Include security scanning stages using freely available tools:
+- SAST: Semgrep (pip install semgrep, run: semgrep --config auto .)
+- SCA: Trivy filesystem scanner (trivy fs --scanners vuln .)
+- Secrets: Trivy secrets scanner (trivy fs --scanners secret .)
+- IaC Security: Trivy config scanner (trivy config .) AND Checkov (pip install checkov, run: checkov -d .)
+
+CRITICAL: All security scans must use `continue-on-error: true` or `|| true` to prevent workflow failures. Security scans are informational only.
+
 IMPORTANT SEQUENCING CONSIDERATIONS:
 - If ECR resources are created by Terraform, infrastructure deployment MUST happen BEFORE container build
 - Job dependencies must be properly sequenced: quality/security → infrastructure (if ECR in Terraform) → container build → application deployment

@@ -2,6 +2,21 @@ Review this pipeline design for security and compliance: {pipeline_design}.
 
 Use the static analyzer results below together with the pipeline design to ensure SAST, SCA, secrets scanning, and least-privilege IAM permissions. 
 
+REQUIRED SECURITY TOOLS (freely available, locally installable):
+- SAST (Static Application Security Testing): Use Semgrep
+  - Install: `pip install semgrep`
+  - Run: `semgrep --config auto .`
+- SCA (Software Composition Analysis): Use Trivy filesystem scanner
+  - Install: Trivy (via aquasecurity/trivy-action or direct install)
+  - Run: `trivy fs --scanners vuln .`
+- Secrets Scanning: Use Trivy secrets scanner
+  - Run: `trivy fs --scanners secret .`
+- IaC Security (Terraform/CloudFormation): Use Trivy config scanner AND Checkov
+  - Trivy: `trivy config .`
+  - Checkov: `pip install checkov` then `checkov -d .`
+
+CRITICAL: All security scans MUST use `continue-on-error: true` or append `|| true` to commands so they do NOT fail the workflow. Security scans are informational and should not block deployments.
+
 IMPORTANT: The pipeline must use OIDC (OpenID Connect) authentication with aws-actions/configure-aws-credentials@v4 and role-to-assume (AWS_ROLE_TO_ASSUME secret), NOT AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY. Ensure the IAM role has least-privilege permissions.
 
 Do not guess beyond the provided data.

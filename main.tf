@@ -457,7 +457,12 @@ resource "aws_bedrockagent_agent" "pipeline_designer_agent" {
 You are a CI/CD pipeline architect. Based on repository analysis, design a comprehensive pipeline with:
 - Appropriate build stages
 - Test execution strategy
-- Security scanning stages (SAST, SCA, container scanning)
+- Security scanning stages using freely available tools:
+  * SAST: Semgrep (pip install semgrep, semgrep --config auto .)
+  * SCA: Trivy filesystem scanner (trivy fs --scanners vuln .)
+  * Secrets: Trivy secrets scanner (trivy fs --scanners secret .)
+  * IaC: Trivy config scanner (trivy config .) AND Checkov (pip install checkov, checkov -d .)
+- ALL security scans must use continue-on-error: true or || true (informational only, must not fail workflow)
 - Container image build and push to ECR
 - Deployment steps for ECS/Fargate
 - Caching strategies
@@ -479,12 +484,21 @@ resource "aws_bedrockagent_agent" "security_compliance_agent" {
   foundation_model        = var.bedrock_foundation_model
   instruction             = <<EOF
 You are a security and compliance expert for CI/CD pipelines. The orchestrator provides you with the latest static_analyzer Lambda output (Dockerfile, dependency, and test analysis). Use that data plus the pipeline design to ensure:
-- SAST (Static Application Security Testing)
-- SCA (Software Composition Analysis) for dependencies
-- Secrets scanning in code and containers
+- SAST (Static Application Security Testing) using Semgrep
+- SCA (Software Composition Analysis) for dependencies using Trivy filesystem scanner
+- Secrets scanning in code and containers using Trivy secrets scanner
+- IaC security scanning using Trivy config scanner and Checkov for Terraform
 - Least privilege IAM permissions
 - Security best practices for AWS deployments
 - Compliance with organizational security policies
+
+REQUIRED SECURITY TOOLS (freely available, locally installable):
+- SAST: Semgrep (pip install semgrep, run: semgrep --config auto .)
+- SCA: Trivy filesystem scanner (trivy fs --scanners vuln .)
+- Secrets: Trivy secrets scanner (trivy fs --scanners secret .)
+- IaC: Trivy config scanner (trivy config .) AND Checkov (pip install checkov, run: checkov -d .)
+
+CRITICAL: All security scans MUST use continue-on-error: true or || true to prevent workflow failures. Security scans are informational only.
 
 Provide actionable security recommendations. If the analyzer results are missing or incomplete, explicitly request the missing data instead of guessing.
 
@@ -505,7 +519,12 @@ You are a GitHub Actions workflow generator. Convert pipeline designs into concr
 WORKFLOW:
 1. Generate workflow YAML that:
    - Uses aws-actions/configure-aws-credentials for AWS authentication
-   - Runs formatting/tests/security scans (tfsec, checkov, etc.)
+   - Includes security scans using freely available tools:
+     * SAST: Semgrep (pip install semgrep, semgrep --config auto .)
+     * SCA: Trivy filesystem scanner (trivy fs --scanners vuln .)
+     * Secrets: Trivy secrets scanner (trivy fs --scanners secret .)
+     * IaC: Trivy config scanner (trivy config .) AND Checkov (pip install checkov, checkov -d .)
+   - ALL security scan steps MUST include continue-on-error: true or || true
    - References secrets with secrets.*
    - Adds helpful comments for each major stage
 2. Append a README-style explanation describing the pipeline, required secrets, and deployment flow.

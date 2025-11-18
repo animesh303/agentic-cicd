@@ -7,6 +7,42 @@ Requirements:
 - Include security scanning and validation stages
 - Reference secrets via secrets.* and variables via vars.*
 
+SECURITY SCANNING REQUIREMENTS (MANDATORY):
+All security scans must use freely available, locally installable tools and MUST NOT fail the workflow:
+
+1. SAST (Static Application Security Testing) - Use Semgrep:
+   - name: Run Semgrep SAST
+     continue-on-error: true
+     run: |
+       pip install semgrep
+       semgrep --config auto . || true
+
+2. SCA (Software Composition Analysis) - Use Trivy:
+   - name: Trivy SCA (Filesystem)
+     continue-on-error: true
+     run: |
+       trivy fs --scanners vuln . || true
+
+3. Secrets Scanning - Use Trivy:
+   - name: Trivy Secrets Scan
+     continue-on-error: true
+     run: |
+       trivy fs --scanners secret . || true
+
+4. IaC Security Scanning - Use Trivy AND Checkov:
+   - name: Trivy IaC Scan
+     continue-on-error: true
+     run: |
+       trivy config . || true
+   
+   - name: Run Checkov
+     continue-on-error: true
+     run: |
+       pip install checkov
+       checkov -d . || true
+
+CRITICAL: Every security scan step MUST include `continue-on-error: true` OR append `|| true` to the command. Security scans are informational and should never block the pipeline.
+
 CRITICAL JOB SEQUENCING RULES:
 - If Terraform creates ECR resources, infrastructure job MUST run BEFORE container build job
 - Use job dependencies (needs:) to enforce proper sequencing
