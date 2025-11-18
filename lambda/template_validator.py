@@ -19,13 +19,53 @@ for first_letter, resolvers in list(LiteralSafeLoader.yaml_implicit_resolvers.it
     LiteralSafeLoader.yaml_implicit_resolvers[first_letter] = filtered
 
 
+def extract_yaml_content(text):
+    """Extract YAML from text (handles fenced code blocks and raw YAML)."""
+    if not text:
+        return ""
+    
+    # First, try to extract from fenced code blocks (```yaml ... ```)
+    fenced_match = re.search(
+        r"```(?:yaml)?\s*\n(.*?)\n```", text, re.DOTALL | re.IGNORECASE
+    )
+    if fenced_match:
+        return fenced_match.group(1).strip()
+    
+    # If no fenced block, try to extract YAML lines
+    # YAML typically starts with "name:", "on:", "jobs:", etc.
+    yaml_lines = []
+    capturing = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        # Start capturing when we see YAML structure indicators
+        if stripped.startswith(("name:", "on:", "jobs:", "workflow_dispatch:", "permissions:")):
+            capturing = True
+        # Stop capturing when we hit markdown headers or other non-YAML content
+        if capturing:
+            if stripped.startswith("#") and len(stripped) > 1 and stripped[1] != " ":
+                # Markdown header (## Header) - stop here
+                break
+            if stripped.startswith("##") or (stripped.startswith("#") and ("Required" in stripped or "README" in stripped or "This workflow" in stripped)):
+                # Markdown section - stop here
+                break
+            yaml_lines.append(line)
+    
+    return "\n".join(yaml_lines).strip()
+
+
 def validate_yaml_syntax(yaml_content):
     """Validate YAML syntax"""
     errors = []
     warnings = []
+    
+    # Extract only YAML portion if content includes markdown
+    yaml_only = extract_yaml_content(yaml_content)
+    if not yaml_only:
+        yaml_only = yaml_content  # Fallback to original if extraction fails
+        warnings.append("Could not extract YAML from content, validating entire content")
 
     try:
-        parsed = yaml.load(yaml_content, Loader=LiteralSafeLoader)
+        parsed = yaml.load(yaml_only, Loader=LiteralSafeLoader)
         if not parsed:
             errors.append("YAML is empty or invalid")
             return {"valid": False, "errors": errors, "warnings": warnings}
@@ -58,8 +98,8 @@ def validate_yaml_syntax(yaml_content):
                             f'Job "{job_name}" step {i+1} missing "uses" or "run"'
                         )
 
-    # Check for common security issues
-    yaml_str = yaml_content.lower()
+    # Check for common security issues (use extracted YAML only)
+    yaml_str = yaml_only.lower()
     if "password" in yaml_str or "secret" in yaml_str:
         if "secrets." not in yaml_str and "${{" not in yaml_str:
             warnings.append("Potential hardcoded secrets detected")
@@ -69,20 +109,35 @@ def validate_yaml_syntax(yaml_content):
 
 def validate_secrets_usage(yaml_content):
     """Check that required secrets are properly referenced"""
-    secrets_used = re.findall(r"\$\{\{\s*secrets\.([^\s}]+)\s*\}\}", yaml_content)
+    # Extract only YAML portion if content includes markdown
+    yaml_only = extract_yaml_content(yaml_content)
+    if not yaml_only:
+        yaml_only = yaml_content  # Fallback to original if extraction fails
+    
+    secrets_used = re.findall(r"\$\{\{\s*secrets\.([^\s}]+)\s*\}\}", yaml_only)
     return {
         "secrets_referenced": list(set(secrets_used)),
         "properly_used": len(secrets_used) > 0
-        or "secrets." not in yaml_content.lower(),
+        or "secrets." not in yaml_only.lower(),
     }
 
 
 def validate_permissions(yaml_content):
     """Check IAM permissions and least privilege"""
     warnings = []
+    
+    # Extract only YAML portion if content includes markdown
+    yaml_only = extract_yaml_content(yaml_content)
+    if not yaml_only:
+        yaml_only = yaml_content  # Fallback to original if extraction fails
 
-    parsed = yaml.load(yaml_content, Loader=LiteralSafeLoader)
-    if not parsed:
+    try:
+        parsed = yaml.load(yaml_only, Loader=LiteralSafeLoader)
+        if not parsed:
+            return {"warnings": warnings}
+    except yaml.YAMLError as e:
+        # If YAML parsing fails, return warnings but don't fail validation
+        warnings.append(f"Could not parse YAML for permissions check: {str(e)}")
         return {"warnings": warnings}
 
     # Check for permissions section

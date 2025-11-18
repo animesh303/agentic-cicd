@@ -490,7 +490,7 @@ def lambda_handler(event, context):
             static_analyzer_payload = {
                 "repo_url": repo_url,
                 "branch": branch,
-                "analysis_types": ["dockerfile", "dependencies", "tests"],
+                "analysis_types": ["dockerfile", "dependencies", "tests", "terraform"],
             }
             static_analyzer_result = invoke_lambda(
                 STATIC_ANALYZER_FUNCTION_NAME, static_analyzer_payload
@@ -587,9 +587,87 @@ def lambda_handler(event, context):
                 if isinstance(pipeline_design_result, dict)
                 else ""
             )
+            
+            # Build ECR guidance based on Terraform analysis
+            ecr_guidance = ""
+            terraform_analysis = None
+            if static_analyzer_result and static_analyzer_result.get("status") == "success":
+                terraform_analysis = static_analyzer_result.get("terraform_analysis", {})
+            
+            if terraform_analysis and terraform_analysis.get("has_ecr"):
+                ecr_resources = terraform_analysis.get("ecr_resources", [])
+                ecr_outputs = terraform_analysis.get("ecr_outputs", [])
+                
+                ecr_guidance = """CRITICAL: ECR resources are defined in Terraform. Infrastructure MUST be deployed BEFORE container build.
+
+JOB SEQUENCING REQUIREMENTS:
+- Create an "infrastructure" job that runs BEFORE the "container" job
+- The infrastructure job must:
+  1. Setup Terraform CLI (hashicorp/setup-terraform@v3 with cli_config_credentials_token) BEFORE any terraform commands
+  2. Configure AWS credentials via OIDC
+  3. Run terraform init, plan, and apply to create ECR resources
+  4. Output ECR_REGISTRY and ECR_REPOSITORY as job outputs or environment variables
+- The container job must:
+  1. Depend on infrastructure job completion (use needs: [infrastructure])
+  2. Get ECR values from infrastructure job outputs or run terraform output
+  3. Use these values in Docker build/push steps
+
+TERRAFORM SETUP ORDER (MUST BE FIRST):
+- Setup Terraform CLI with cli_config_credentials_token BEFORE terraform init
+- Example:
+  - name: Setup Terraform
+    uses: hashicorp/setup-terraform@v3
+    with:
+      cli_config_credentials_token: ${{{{ secrets.TF_API_TOKEN }}}}
+  - name: Terraform Init
+    run: terraform init
+
+ECR VALUE EXTRACTION:
+- If Terraform outputs exist for ECR, use them:
+  - Add step: `terraform output -json` to get outputs
+  - Extract: `ECR_REGISTRY=$(jq -r '.ecr_registry.value' terraform_outputs.json)`
+  - Extract: `ECR_REPOSITORY=$(jq -r '.ecr_repository.value' terraform_outputs.json)`
+- If outputs don't exist, derive from resources:
+  - Get AWS account ID: `aws sts get-caller-identity --query Account --output text`
+  - Construct registry: `${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com`
+  - Extract repository name from aws_ecr_repository resource
+
+WORKFLOW STRUCTURE:
+jobs:
+  infrastructure:
+    runs-on: ubuntu-latest
+    needs: [quality, security]  # or appropriate dependencies
+    steps:
+      - Setup Terraform CLI (with cli_config_credentials_token)
+      - Configure AWS credentials
+      - terraform init
+      - terraform plan
+      - terraform apply
+      - Get ECR outputs and set as job outputs
+  
+  container:
+    runs-on: ubuntu-latest
+    needs: [infrastructure]  # CRITICAL: Must wait for infrastructure
+    steps:
+      - Get ECR values from infrastructure job or terraform output
+      - Build and push Docker image
+
+- DO NOT use vars.ECR_REGISTRY or vars.ECR_REPOSITORY if ECR is managed by Terraform."""
+            else:
+                ecr_guidance = """- If ECR_REGISTRY and ECR_REPOSITORY are pre-configured as GitHub variables, use:
+  - ECR_REGISTRY: ${{{{ vars.ECR_REGISTRY }}}}
+  - ECR_REPOSITORY: ${{{{ vars.ECR_REPOSITORY }}}}
+
+- If ECR resources are created by Terraform:
+  - Infrastructure job MUST run before container build job
+  - Setup Terraform CLI (with cli_config_credentials_token) BEFORE any terraform commands
+  - Deploy infrastructure first, then extract ECR values from outputs
+  - Container job must depend on infrastructure job (needs: [infrastructure])"""
+            
             base_prompt = format_prompt(
                 "yaml_generator_base",
                 pipeline_design=pipeline_design,
+                ecr_guidance=ecr_guidance,
             )
 
             max_yaml_attempts = 2

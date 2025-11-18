@@ -1,2 +1,7 @@
 Based on this repository analysis: {repo_analysis}, design a CI/CD pipeline with appropriate stages for build, test, scan, container build, ECR push, and ECS deployment.
 
+IMPORTANT SEQUENCING CONSIDERATIONS:
+- If ECR resources are created by Terraform, infrastructure deployment MUST happen BEFORE container build
+- Job dependencies must be properly sequenced: quality/security → infrastructure (if ECR in Terraform) → container build → application deployment
+- Terraform setup (CLI configuration) must occur BEFORE any terraform commands (init, plan, apply)
+

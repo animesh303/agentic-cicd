@@ -6,7 +6,22 @@ Requirements:
 - DO NOT use AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY - use OIDC authentication only
 - Include security scanning and validation stages
 - Reference secrets via secrets.* and variables via vars.*
-- Add concise comments and a README-style explanation after the YAML
+
+CRITICAL JOB SEQUENCING RULES:
+- If Terraform creates ECR resources, infrastructure job MUST run BEFORE container build job
+- Use job dependencies (needs:) to enforce proper sequencing
+- Infrastructure job should depend on quality/security checks
+- Container build job should depend on infrastructure job when ECR is in Terraform
+
+TERRAFORM SETUP REQUIREMENTS:
+- ALWAYS setup Terraform CLI (hashicorp/setup-terraform@v3) BEFORE any terraform commands
+- Use cli_config_credentials_token: ${{{{ secrets.TF_API_TOKEN }}}} if Terraform Cloud/Enterprise is used
+- Setup step must come before terraform init, plan, or apply
+
+ECR Configuration Handling:
+{ecr_guidance}
+
+Add concise comments and a README-style explanation after the YAML.
 
 Return ONLY the workflow inside a ```yaml code fence followed immediately by the README text. Do not include any other prose before the YAML block.
 

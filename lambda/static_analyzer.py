@@ -127,6 +127,97 @@ def analyze_dependencies(manifest_path, manifest_type):
         'test_frameworks': list(set(test_frameworks))
     }
 
+def analyze_terraform_ecr(tmpdir):
+    """
+    Analyze Terraform files to detect ECR repositories and related resources.
+    Returns ECR registry, repository name, and output references if found.
+    """
+    ecr_resources = []
+    ecr_outputs = []
+    
+    try:
+        # Find all Terraform files
+        terraform_files = []
+        for root, dirs, files in os.walk(tmpdir):
+            for f in files:
+                if f.endswith('.tf') or f.endswith('.tf.json'):
+                    terraform_files.append(os.path.join(root, f))
+        
+        for tf_file in terraform_files:
+            try:
+                with open(tf_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                    
+                    # Look for ECR repository resources
+                    # Pattern: resource "aws_ecr_repository" "name" { ... }
+                    ecr_pattern = r'resource\s+"aws_ecr_repository"\s+"([^"]+)"\s*\{[^}]*name\s*=\s*["\']([^"\']+)["\']'
+                    matches = re.finditer(ecr_pattern, content, re.MULTILINE | re.DOTALL)
+                    
+                    for match in matches:
+                        resource_name = match.group(1)
+                        repo_name = match.group(2)
+                        ecr_resources.append({
+                            'resource_name': resource_name,
+                            'repository_name': repo_name,
+                            'file': os.path.relpath(tf_file, tmpdir)
+                        })
+                    
+                    # Look for ECR outputs
+                    # Pattern: output "ecr_registry" { value = ... }
+                    # Pattern: output "ecr_repository" { value = ... }
+                    output_pattern = r'output\s+"([^"]+)"\s*\{[^}]*value\s*=\s*([^}]+)\}'
+                    output_matches = re.finditer(output_pattern, content, re.MULTILINE | re.DOTALL)
+                    
+                    for match in output_matches:
+                        output_name = match.group(1).lower()
+                        output_value = match.group(2).strip()
+                        
+                        # Check if this is an ECR-related output
+                        if 'ecr' in output_name or 'registry' in output_name or 'repository' in output_name:
+                            # Try to extract the actual value or reference
+                            value_ref = None
+                            if 'aws_ecr_repository' in output_value:
+                                # Extract resource reference like aws_ecr_repository.example.repository_url
+                                ref_match = re.search(r'aws_ecr_repository\.([^.]+)\.(repository_url|repository_name)', output_value)
+                                if ref_match:
+                                    value_ref = f"aws_ecr_repository.{ref_match.group(1)}.{ref_match.group(2)}"
+                            
+                            ecr_outputs.append({
+                                'output_name': match.group(1),
+                                'output_value': output_value,
+                                'value_reference': value_ref,
+                                'file': os.path.relpath(tf_file, tmpdir)
+                            })
+                    
+                    # Look for data source references to ECR
+                    # Pattern: data "aws_caller_identity" "current" {} (for registry)
+                    if 'data "aws_caller_identity"' in content:
+                        # Registry can be constructed from account ID and region
+                        ecr_outputs.append({
+                            'output_name': 'ecr_registry_derived',
+                            'output_value': 'data.aws_caller_identity.current.account_id',
+                            'value_reference': 'Derived from AWS account ID',
+                            'file': os.path.relpath(tf_file, tmpdir),
+                            'note': 'ECR registry can be derived from account ID and region'
+                        })
+            except Exception as e:
+                print(f"Error analyzing Terraform file {tf_file}: {e}")
+                continue
+        
+        return {
+            'ecr_resources': ecr_resources,
+            'ecr_outputs': ecr_outputs,
+            'has_ecr': len(ecr_resources) > 0 or len(ecr_outputs) > 0
+        }
+    except Exception as e:
+        print(f"Error in analyze_terraform_ecr: {e}")
+        return {
+            'ecr_resources': [],
+            'ecr_outputs': [],
+            'has_ecr': False,
+            'error': str(e)
+        }
+
 def detect_test_files(repo_dir):
     """Detect test files and test directories"""
     test_files = []
@@ -471,6 +562,10 @@ def lambda_handler(event, context):
         # Detect test files
         if 'tests' in analysis_types:
             results['test_analysis'] = detect_test_files(tmpdir)
+        
+        # Analyze Terraform for ECR resources
+        if 'terraform' in analysis_types or 'infrastructure' in analysis_types:
+            results['terraform_analysis'] = analyze_terraform_ecr(tmpdir)
         
         results['status'] = 'success'
         
