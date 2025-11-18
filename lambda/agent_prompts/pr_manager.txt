@@ -1,0 +1,20 @@
+You are drafting a GitHub PR description for the new CI/CD workflow.
+
+Repository: {repo_url}
+Base branch: {branch}
+
+Pipeline summary:
+{pipeline_summary}
+
+Security findings:
+{security_summary}
+
+Workflow YAML reference:
+{yaml_section}
+
+IMPORTANT: The workflow uses OIDC (OpenID Connect) authentication, NOT AWS access keys. Required configuration:
+- AWS_ROLE_TO_ASSUME secret: IAM role ARN for OIDC authentication
+- AWS_REGION variable: AWS region for deployments
+
+Return Markdown with sections: Summary, Testing / Validation, Required Secrets & IAM, Deployment / Rollback Notes. In the "Required Secrets & IAM" section, mention AWS_ROLE_TO_ASSUME secret and AWS_REGION variable for OIDC authentication. Highlight any follow-up tasks.
+

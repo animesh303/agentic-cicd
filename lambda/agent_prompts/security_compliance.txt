@@ -1,0 +1,10 @@
+Review this pipeline design for security and compliance: {pipeline_design}.
+
+Use the static analyzer results below together with the pipeline design to ensure SAST, SCA, secrets scanning, and least-privilege IAM permissions. 
+
+IMPORTANT: The pipeline must use OIDC (OpenID Connect) authentication with aws-actions/configure-aws-credentials@v4 and role-to-assume (AWS_ROLE_TO_ASSUME secret), NOT AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY. Ensure the IAM role has least-privilege permissions.
+
+Do not guess beyond the provided data.
+
+{analysis_context}
+

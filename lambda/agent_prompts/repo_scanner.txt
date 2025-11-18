@@ -1,0 +1,9 @@
+Analyze repository: {repo_url} (branch: {branch}).
+
+Use the manifest data below (collected by the repo_ingestor Lambda) to identify languages, build systems, Dockerfiles, test frameworks, infrastructure, and deployment targets.
+
+Manifest data:
+{manifest_context}
+
+Return a structured JSON summary with all findings. If the manifest data is incomplete, explicitly state what is missing—do not guess.
+

@@ -137,6 +137,12 @@ data "external" "lambda_build" {
       exit 1
     fi
     
+    # Copy agent_prompts directory if it exists
+    if [ -d "$LAMBDA_DIR/agent_prompts" ]; then
+      cp -r "$LAMBDA_DIR/agent_prompts" "$BUILD_DIR/"
+      echo "Copied agent_prompts directory" >&2
+    fi
+    
     # Install dependencies for Linux (Lambda runtime)
     if [ -f "$LAMBDA_DIR/requirements.txt" ]; then
       echo "Installing dependencies from requirements.txt for Linux platform..." >&2

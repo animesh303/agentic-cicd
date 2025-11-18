@@ -56,6 +56,13 @@ else
     exit 1
 fi
 
+# Copy agent_prompts directory if it exists
+if [ -d "$LAMBDA_DIR/agent_prompts" ]; then
+    echo "Copying agent_prompts directory..."
+    cp -r "$LAMBDA_DIR/agent_prompts" "$BUILD_DIR/"
+    echo "  ✓ Copied agent_prompts directory"
+fi
+
 # Install dependencies if requirements.txt exists
 if [ -f "$LAMBDA_DIR/requirements.txt" ]; then
     echo ""

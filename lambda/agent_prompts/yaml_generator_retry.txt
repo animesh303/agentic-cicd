@@ -1,0 +1,4 @@
+The previous response did not include a valid YAML workflow. Try again and output ONLY the workflow inside a ```yaml fenced block followed by the README text. Do not include apologies or extra commentary.
+
+{base_prompt}
+

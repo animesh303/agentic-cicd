@@ -1,0 +1,18 @@
+## Summary
+Adds an automated CI/CD workflow covering validation, security scanning, planning, deployment, and drift checks.
+
+**Generated at:** {timestamp}
+
+## Testing / Validation
+- Trigger workflow on a PR and review tfsec/checkov/infracost outputs.
+- Run `terraform plan` locally before merging.
+
+## Required Secrets / IAM
+- AWS_ROLE_TO_ASSUME secret: IAM role ARN for OIDC authentication (configured in GitHub repository settings)
+- AWS_REGION variable: AWS region for deployments (configured in GitHub repository variables)
+- INFRACOST_API_KEY for cost estimation (if applicable).
+
+## Deployment / Rollback
+- Workflow deploys from `main` with approvals.
+- Revert by rolling back `.github/workflows/ci-cd.yml` if needed.
+

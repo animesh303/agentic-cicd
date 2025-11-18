@@ -1,0 +1,2 @@
+Based on this repository analysis: {repo_analysis}, design a CI/CD pipeline with appropriate stages for build, test, scan, container build, ECR push, and ECS deployment.
+

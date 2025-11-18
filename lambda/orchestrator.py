@@ -9,6 +9,7 @@ import boto3
 import os
 from datetime import datetime
 from botocore.config import Config
+from agent_prompts.prompt_loader import format_prompt
 
 # Initialize clients - AWS_REGION is automatically set by Lambda runtime
 # Use explicit region to ensure consistency with Bedrock agents
@@ -455,14 +456,12 @@ def lambda_handler(event, context):
             else:
                 manifest_context = "No manifest data is available (ingestion failed)."
 
-            input_text = f"""Analyze repository: {repo_url} (branch: {branch}).
-
-Use the manifest data below (collected by the repo_ingestor Lambda) to identify languages, build systems, Dockerfiles, test frameworks, infrastructure, and deployment targets.
-
-Manifest data:
-{manifest_context}
-
-Return a structured JSON summary with all findings. If the manifest data is incomplete, explicitly state what is missing—do not guess."""
+            input_text = format_prompt(
+                "repo_scanner",
+                repo_url=repo_url,
+                branch=branch,
+                manifest_context=manifest_context,
+            )
 
             result = invoke_agent(
                 agent_ids["repo_scanner"], AGENT_ALIAS_ID, session_id, input_text
@@ -527,7 +526,10 @@ Return a structured JSON summary with all findings. If the manifest data is inco
         if "pipeline_designer" in agent_ids:
             session_id = f"{task_id}-pipeline-designer"
             repo_analysis = repo_scanner_summary
-            input_text = f"Based on this repository analysis: {repo_analysis}, design a CI/CD pipeline with appropriate stages for build, test, scan, container build, ECR push, and ECS deployment."
+            input_text = format_prompt(
+                "pipeline_designer",
+                repo_analysis=repo_analysis,
+            )
 
             result = invoke_agent(
                 agent_ids["pipeline_designer"], AGENT_ALIAS_ID, session_id, input_text
@@ -545,10 +547,7 @@ Return a structured JSON summary with all findings. If the manifest data is inco
                 if isinstance(pipeline_design_result, dict)
                 else ""
             )
-            input_text = f"""Review this pipeline design for security and compliance: {pipeline_design}.
-
-Use the static analyzer results below together with the pipeline design to ensure SAST, SCA, secrets scanning, and least-privilege IAM permissions. Do not guess beyond the provided data."""
-
+            
             # Include static analyzer results if available (even if status is not success, include what we have)
             analysis_context = ""
             if static_analyzer_result:
@@ -557,12 +556,18 @@ Use the static analyzer results below together with the pipeline design to ensur
                 else:
                     # Include error information so agent knows static analysis failed
                     analysis_context = f"\n\nNote: Static analysis encountered an issue: {static_analyzer_result.get('message', 'Unknown error')}. Please proceed with security review based on the pipeline design."
+            
+            input_text = format_prompt(
+                "security_compliance",
+                pipeline_design=pipeline_design,
+                analysis_context=analysis_context,
+            )
 
             result = invoke_agent(
                 agent_ids["security_compliance"],
                 AGENT_ALIAS_ID,
                 session_id,
-                input_text + analysis_context,
+                input_text,
             )
             workflow_steps.append({"step": "security_compliance", "result": result})
             security_recommendations = result.get("completion", "")
@@ -582,15 +587,10 @@ Use the static analyzer results below together with the pipeline design to ensur
                 if isinstance(pipeline_design_result, dict)
                 else ""
             )
-            base_prompt = f"""Generate GitHub Actions workflow YAML based on this pipeline design: {pipeline_design}.
-
-Requirements:
-- Use aws-actions/configure-aws-credentials for AWS auth
-- Include security scanning and validation stages
-- Reference secrets via secrets.*
-- Add concise comments and a README-style explanation after the YAML
-
-Return ONLY the workflow inside a ```yaml code fence followed immediately by the README text. Do not include any other prose before the YAML block."""
+            base_prompt = format_prompt(
+                "yaml_generator_base",
+                pipeline_design=pipeline_design,
+            )
 
             max_yaml_attempts = 2
             yaml_content = ""
@@ -600,7 +600,10 @@ Return ONLY the workflow inside a ```yaml code fence followed immediately by the
                 prompt = (
                     base_prompt
                     if attempt == 1
-                    else f"""The previous response did not include a valid YAML workflow. Try again and output ONLY the workflow inside a ```yaml fenced block followed by the README text. Do not include apologies or extra commentary.\n\n{base_prompt}"""
+                    else format_prompt(
+                        "yaml_generator_retry",
+                        base_prompt=base_prompt,
+                    )
                 )
 
                 result = invoke_agent(
@@ -734,21 +737,14 @@ Return ONLY the workflow inside a ```yaml code fence followed immediately by the
                 else "YAML generation failed."
             )
 
-            input_text = f"""You are drafting a GitHub PR description for the new CI/CD workflow.
-
-Repository: {repo_url}
-Base branch: {branch}
-
-Pipeline summary:
-{pipeline_summary}
-
-Security findings:
-{security_summary}
-
-Workflow YAML reference:
-{yaml_section}
-
-Return Markdown with sections: Summary, Testing / Validation, Required Secrets & IAM, Deployment / Rollback Notes. Highlight any follow-up tasks."""
+            input_text = format_prompt(
+                "pr_manager",
+                repo_url=repo_url,
+                branch=branch,
+                pipeline_summary=pipeline_summary,
+                security_summary=security_summary,
+                yaml_section=yaml_section,
+            )
 
             result = invoke_agent(
                 agent_ids["pr_manager"], AGENT_ALIAS_ID, session_id, input_text
@@ -770,19 +766,9 @@ Return Markdown with sections: Summary, Testing / Validation, Required Secrets &
         if not pr_body:
             # Generate unique PR body with timestamp
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
-            pr_body = (
-                f"## Summary\n"
-                f"Adds an automated CI/CD workflow covering validation, security scanning, planning, deployment, and drift checks.\n\n"
-                f"**Generated at:** {timestamp}\n\n"
-                f"## Testing / Validation\n"
-                f"- Trigger workflow on a PR and review tfsec/checkov/infracost outputs.\n"
-                f"- Run `terraform plan` locally before merging.\n\n"
-                f"## Required Secrets / IAM\n"
-                f"- AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY with least-privilege Terraform access.\n"
-                f"- INFRACOST_API_KEY for cost estimation.\n\n"
-                f"## Deployment / Rollback\n"
-                f"- Workflow deploys from `main` with approvals.\n"
-                f"- Revert by rolling back `.github/workflows/ci-cd.yml` if needed."
+            pr_body = format_prompt(
+                "pr_body_default",
+                timestamp=timestamp,
             )
 
         if yaml_content:

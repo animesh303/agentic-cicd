@@ -1,0 +1,12 @@
+Generate GitHub Actions workflow YAML based on this pipeline design: {pipeline_design}.
+
+Requirements:
+- Use aws-actions/configure-aws-credentials@v4 for AWS authentication via OIDC (OpenID Connect)
+- Configure AWS credentials using role-to-assume: ${{{{ secrets.AWS_ROLE_TO_ASSUME }}}} and aws-region: ${{{{ vars.AWS_REGION }}}}
+- DO NOT use AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY - use OIDC authentication only
+- Include security scanning and validation stages
+- Reference secrets via secrets.* and variables via vars.*
+- Add concise comments and a README-style explanation after the YAML
+
+Return ONLY the workflow inside a ```yaml code fence followed immediately by the README text. Do not include any other prose before the YAML block.
+
