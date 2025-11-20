@@ -1,5 +1,7 @@
 Based on this repository analysis: {repo_analysis}, design a CI/CD pipeline with appropriate stages for build, test, scan, container build, ECR push, and ECS deployment.
 
+{repo_structure}
+
 QUALITY AND SECURITY SCANNING STAGES (REQUIRED - PARALLEL JOBS):
 Design quality and security scanning as SEPARATE PARALLEL JOBS that run simultaneously. This improves pipeline speed and allows independent execution.
 

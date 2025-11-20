@@ -522,6 +522,27 @@ def lambda_handler(event, context):
                 "Warning: STATIC_ANALYZER_FUNCTION_NAME not set, skipping static analysis"
             )
 
+        # Extract repository structure for context
+        repo_structure_context = ""
+        if (
+            repo_ingestion_result
+            and repo_ingestion_result.get("status") == "success"
+            and "repository_structure" in repo_ingestion_result
+        ):
+            structure = repo_ingestion_result.get("repository_structure", {})
+            structure_text = "Repository Structure:\n"
+            if structure.get("tree"):
+                structure_text += "\n".join(structure["tree"][:50])  # Limit to first 50 lines
+                if len(structure["tree"]) > 50:
+                    structure_text += f"\n... (showing first 50 of {len(structure['tree'])} lines)"
+            if structure.get("terraform_working_dir"):
+                structure_text += f"\n\nTerraform Working Directory: {structure['terraform_working_dir']}"
+            if structure.get("terraform_directories"):
+                structure_text += f"\nTerraform Directories: {', '.join(structure['terraform_directories'])}"
+            repo_structure_context = structure_text
+        else:
+            repo_structure_context = "Repository structure information not available."
+
         # Step 3: Pipeline Designer Agent
         if "pipeline_designer" in agent_ids:
             session_id = f"{task_id}-pipeline-designer"
@@ -529,6 +550,7 @@ def lambda_handler(event, context):
             input_text = format_prompt(
                 "pipeline_designer",
                 repo_analysis=repo_analysis,
+                repo_structure=repo_structure_context,
             )
 
             result = invoke_agent(
@@ -588,6 +610,16 @@ def lambda_handler(event, context):
                 else ""
             )
             
+            # Extract Terraform working directory from repository structure
+            terraform_working_dir = "."
+            if (
+                repo_ingestion_result
+                and repo_ingestion_result.get("status") == "success"
+                and "repository_structure" in repo_ingestion_result
+            ):
+                structure = repo_ingestion_result.get("repository_structure", {})
+                terraform_working_dir = structure.get("terraform_working_dir", ".")
+            
             # Build ECR and ECS guidance based on Terraform analysis
             ecr_guidance = ""
             ecs_guidance = ""
@@ -600,7 +632,7 @@ def lambda_handler(event, context):
                 ecr_resources = terraform_analysis.get("ecr_resources", [])
                 ecr_outputs = terraform_analysis.get("ecr_outputs", [])
                 
-                ecr_guidance = """CRITICAL: ECR resources are defined in Terraform. Infrastructure MUST be deployed BEFORE container build.
+                ecr_guidance = f"""CRITICAL: ECR resources are defined in Terraform. Infrastructure MUST be deployed BEFORE container build.
 
 JOB SEQUENCING REQUIREMENTS:
 - Create an "infrastructure" job that runs BEFORE the "container" job
@@ -616,23 +648,31 @@ JOB SEQUENCING REQUIREMENTS:
 
 TERRAFORM SETUP ORDER (MUST BE FIRST):
 - Setup Terraform CLI with cli_config_credentials_token BEFORE terraform init
+- CRITICAL: All terraform commands MUST run in the correct working directory: {terraform_working_dir}
 - Example:
   - name: Setup Terraform
     uses: hashicorp/setup-terraform@v3
     with:
       cli_config_credentials_token: ${{{{ secrets.TF_API_TOKEN }}}}
   - name: Terraform Init
+    working-directory: {terraform_working_dir}
     run: terraform init
+  - name: Terraform Plan
+    working-directory: {terraform_working_dir}
+    run: terraform plan
+  - name: Terraform Apply
+    working-directory: {terraform_working_dir}
+    run: terraform apply -auto-approve
 
 ECR VALUE EXTRACTION:
 - If Terraform outputs exist for ECR, use them:
-  - Add step: `terraform output -json` to get outputs
+  - Add step: `terraform output -json` in the working directory: {terraform_working_dir}
   - Extract: `ECR_REGISTRY=$(jq -r '.ecr_registry.value' terraform_outputs.json)`
   - Extract: `ECR_REPOSITORY=$(jq -r '.ecr_repository.value' terraform_outputs.json)`
-- If outputs don't exist, derive from resources:
-  - Get AWS account ID: `aws sts get-caller-identity --query Account --output text`
-  - Construct registry: `${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com`
-  - Extract repository name from aws_ecr_repository resource
+- If Terraform outputs don't exist for ECR registry:
+  - Use GitHub variable: `ECR_REGISTRY: ${{{{ vars.ECR_REGISTRY }}}}`
+  - Extract repository name from Terraform outputs or use GitHub variable: `ECR_REPOSITORY: ${{{{ vars.ECR_REPOSITORY }}}}`
+  - DO NOT construct the registry URL from ACCOUNT_ID - always use GitHub variables if Terraform outputs are not available
 
 WORKFLOW STRUCTURE:
 jobs:
@@ -657,10 +697,10 @@ jobs:
     steps:
       - Setup Terraform CLI (with cli_config_credentials_token)
       - Configure AWS credentials
-      - terraform init
-      - terraform plan
-      - terraform apply
-      - Get ECR outputs and set as job outputs
+      - terraform init (with working-directory: {terraform_working_dir})
+      - terraform plan (with working-directory: {terraform_working_dir})
+      - terraform apply (with working-directory: {terraform_working_dir})
+      - Get ECR outputs and set as job outputs (with working-directory: {terraform_working_dir})
   
   container:
     runs-on: ubuntu-latest
@@ -673,7 +713,8 @@ jobs:
       - Build and push Docker image
 
 - DO NOT use vars.ECR_REGISTRY or vars.ECR_REPOSITORY if ECR is managed by Terraform.
-- CRITICAL: Every job that uses aws-actions/configure-aws-credentials@v4 MUST have `permissions: id-token: write` or OIDC will fail."""
+- CRITICAL: Every job that uses aws-actions/configure-aws-credentials@v4 MUST have `permissions: id-token: write` or OIDC will fail.
+- CRITICAL: All terraform commands MUST use `working-directory: {terraform_working_dir}` to run in the correct directory."""
             else:
                 ecr_guidance = """- If ECR_REGISTRY and ECR_REPOSITORY are pre-configured as GitHub variables, use:
   - ECR_REGISTRY: ${{{{ vars.ECR_REGISTRY }}}}
@@ -690,7 +731,7 @@ jobs:
                 ecs_resources = terraform_analysis.get("ecs_resources", [])
                 ecs_outputs = terraform_analysis.get("ecs_outputs", [])
                 
-                ecs_guidance = """CRITICAL: ECS resources are defined in Terraform. Infrastructure MUST be deployed BEFORE deploy job.
+                ecs_guidance = f"""CRITICAL: ECS resources are defined in Terraform. Infrastructure MUST be deployed BEFORE deploy job.
 
 JOB SEQUENCING REQUIREMENTS:
 - Create an "infrastructure" job that runs BEFORE the "deploy" job
@@ -706,9 +747,10 @@ JOB SEQUENCING REQUIREMENTS:
 
 ECS VALUE EXTRACTION:
 - If Terraform outputs exist for ECS, use them:
-  - Add step in infrastructure job to extract ECS outputs:
+  - Add step in infrastructure job to extract ECS outputs (MUST use working-directory: {terraform_working_dir}):
     - name: Get ECS Details
       id: ecs-details
+      working-directory: {terraform_working_dir}
       run: |
         echo "cluster=$(terraform output -raw ecs_cluster)" >> $GITHUB_OUTPUT
         echo "service=$(terraform output -raw ecs_service)" >> $GITHUB_OUTPUT
@@ -724,7 +766,8 @@ ECS VALUE EXTRACTION:
     run: aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE }} --force-new-deployment
 
 - DO NOT use secrets.ECS_CLUSTER or secrets.ECS_SERVICE if ECS is managed by Terraform.
-- CRITICAL: Every job that uses aws-actions/configure-aws-credentials@v4 MUST have `permissions: id-token: write` or OIDC will fail."""
+- CRITICAL: Every job that uses aws-actions/configure-aws-credentials@v4 MUST have `permissions: id-token: write` or OIDC will fail.
+- CRITICAL: All terraform commands MUST use `working-directory: {terraform_working_dir}` to run in the correct directory."""
             else:
                 ecs_guidance = """- If ECS_CLUSTER and ECS_SERVICE are pre-configured as GitHub secrets, use:
   - ECS_CLUSTER: ${{{{ secrets.ECS_CLUSTER }}}}
@@ -741,6 +784,8 @@ ECS VALUE EXTRACTION:
                 pipeline_design=pipeline_design,
                 ecr_guidance=ecr_guidance,
                 ecs_guidance=ecs_guidance,
+                repo_structure=repo_structure_context,
+                terraform_working_dir=terraform_working_dir,
             )
 
             max_yaml_attempts = 2

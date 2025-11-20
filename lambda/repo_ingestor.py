@@ -21,6 +21,99 @@ def extract_manifest_content(file_path):
         return None
 
 
+def generate_repository_structure(repo_dir, max_depth=3):
+    """
+    Generate a tree-like representation of repository structure.
+    Returns a dictionary with directory structure and key file locations.
+    """
+    structure = {
+        "tree": [],
+        "key_paths": {
+            "terraform": [],
+            "dockerfiles": [],
+            "package_manifests": [],
+            "kubernetes": [],
+            "helm": [],
+        },
+    }
+    
+    def build_tree(path, prefix="", depth=0):
+        """Recursively build directory tree"""
+        if depth > max_depth:
+            return []
+        
+        items = []
+        try:
+            entries = sorted(os.listdir(path))
+            # Filter out hidden files and common ignore patterns
+            entries = [
+                e
+                for e in entries
+                if not e.startswith(".")
+                and e not in ["__pycache__", "node_modules", ".git"]
+            ]
+            
+            for i, entry in enumerate(entries):
+                entry_path = os.path.join(path, entry)
+                rel_path = os.path.relpath(entry_path, repo_dir)
+                is_last = i == len(entries) - 1
+                
+                if os.path.isdir(entry_path):
+                    items.append(f"{prefix}{'└── ' if is_last else '├── '}{entry}/")
+                    extension = "    " if is_last else "│   "
+                    items.extend(build_tree(entry_path, prefix + extension, depth + 1))
+                else:
+                    items.append(f"{prefix}{'└── ' if is_last else '├── '}{entry}")
+                    
+                    # Track key file types
+                    if entry.endswith((".tf", ".tf.json")):
+                        structure["key_paths"]["terraform"].append(rel_path)
+                    elif entry.lower().startswith("dockerfile") or entry == "Dockerfile":
+                        structure["key_paths"]["dockerfiles"].append(rel_path)
+                    elif entry in [
+                        "package.json",
+                        "requirements.txt",
+                        "pom.xml",
+                        "build.gradle",
+                        "go.mod",
+                        "Cargo.toml",
+                    ]:
+                        structure["key_paths"]["package_manifests"].append(rel_path)
+                    elif entry.endswith((".yaml", ".yml")):
+                        # Check if it's K8s or Helm
+                        try:
+                            with open(entry_path, "r", encoding="utf-8", errors="ignore") as f:
+                                content = f.read()
+                                if "apiVersion" in content and ("kind:" in content):
+                                    structure["key_paths"]["kubernetes"].append(rel_path)
+                                elif entry in ["Chart.yaml", "values.yaml"]:
+                                    structure["key_paths"]["helm"].append(rel_path)
+                        except:
+                            pass
+        except PermissionError:
+            pass
+        
+        return items
+    
+    structure["tree"] = build_tree(repo_dir)
+    
+    # Determine Terraform working directory (directory containing .tf files)
+    terraform_dirs = set()
+    for tf_path in structure["key_paths"]["terraform"]:
+        dir_path = os.path.dirname(tf_path)
+        terraform_dirs.add(dir_path if dir_path else ".")
+    
+    structure["terraform_working_dir"] = (
+        list(terraform_dirs)[0] if len(terraform_dirs) == 1 else "."
+    )
+    if len(terraform_dirs) > 1:
+        # Multiple directories with Terraform files
+        structure["terraform_working_dir"] = "."
+        structure["terraform_directories"] = sorted(list(terraform_dirs))
+    
+    return structure
+
+
 def download_repo_as_zip(repo_url, branch, tmpdir):
     """
     Download a GitHub repository as a ZIP file and extract it.
@@ -301,6 +394,9 @@ def lambda_handler(event, context):
         # Download repository as ZIP (no git required)
         download_repo_as_zip(repo_url, branch, tmpdir)
 
+        # Generate repository structure
+        repo_structure = generate_repository_structure(tmpdir)
+        
         # Walk through repository
         for root, dirs, files in os.walk(tmpdir):
             # Skip .git directory
@@ -364,6 +460,7 @@ def lambda_handler(event, context):
             "repo_url": repo_url,
             "branch": branch,
             "manifests": manifests,
+            "repository_structure": repo_structure,
         }
 
         # Return in Bedrock format if invoked by agent

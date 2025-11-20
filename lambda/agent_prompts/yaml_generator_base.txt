@@ -1,5 +1,18 @@
 Generate GitHub Actions workflow YAML based on this pipeline design: {pipeline_design}.
 
+REPOSITORY STRUCTURE CONTEXT:
+{repo_structure}
+
+CRITICAL: TERRAFORM WORKING DIRECTORY:
+- Terraform files are located in: {terraform_working_dir}
+- When running terraform commands (init, plan, apply), you MUST change to this directory first using `working-directory: {terraform_working_dir}` or `cd {terraform_working_dir}`
+- Example CORRECT format:
+  - name: Terraform Init
+    working-directory: {terraform_working_dir}
+    run: terraform init
+- If terraform_working_dir is ".", Terraform files are in the repository root
+- If terraform_working_dir is a subdirectory (e.g., "infrastructure"), you MUST specify the working-directory in ALL terraform steps
+
 WORKFLOW TRIGGERS (CRITICAL):
 - The workflow MUST trigger ONLY when a pull request is closed (merged) to the main branch
 - Use ONLY the `pull_request` trigger with `types: [closed]` and `branches: [main]`
@@ -174,6 +187,25 @@ TERRAFORM SETUP REQUIREMENTS:
 - ALWAYS setup Terraform CLI (hashicorp/setup-terraform@v3) BEFORE any terraform commands
 - Use cli_config_credentials_token: ${{{{ secrets.TF_API_TOKEN }}}} if Terraform Cloud/Enterprise is used
 - Setup step must come before terraform init, plan, or apply
+- CRITICAL: All terraform commands (init, plan, apply, output) MUST run in the correct working directory
+- Use `working-directory: {terraform_working_dir}` in each terraform step, OR use `cd {terraform_working_dir} && terraform ...` format
+- Example CORRECT format:
+  - name: Setup Terraform
+    uses: hashicorp/setup-terraform@v3
+    with:
+      cli_config_credentials_token: ${{{{ secrets.TF_API_TOKEN }}}}
+  - name: Terraform Init
+    working-directory: {terraform_working_dir}
+    run: terraform init
+  - name: Terraform Plan
+    working-directory: {terraform_working_dir}
+    run: terraform plan
+  - name: Terraform Apply
+    working-directory: {terraform_working_dir}
+    run: terraform apply -auto-approve
+  - name: Get Terraform Outputs
+    working-directory: {terraform_working_dir}
+    run: terraform output -json > terraform_outputs.json
 
 CRITICAL: AWS CLI COMMAND FORMATTING:
 - ALL AWS CLI commands MUST be written on a SINGLE LINE
