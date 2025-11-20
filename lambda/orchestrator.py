@@ -639,6 +639,9 @@ jobs:
   infrastructure:
     runs-on: ubuntu-latest
     needs: [quality, security]  # or appropriate dependencies
+    permissions:
+      id-token: write  # REQUIRED for OIDC authentication
+      contents: read   # Required for checkout
     steps:
       - Setup Terraform CLI (with cli_config_credentials_token)
       - Configure AWS credentials
@@ -650,11 +653,15 @@ jobs:
   container:
     runs-on: ubuntu-latest
     needs: [infrastructure]  # CRITICAL: Must wait for infrastructure
+    permissions:
+      id-token: write  # REQUIRED for OIDC authentication
+      contents: read   # Required for checkout
     steps:
       - Get ECR values from infrastructure job or terraform output
       - Build and push Docker image
 
-- DO NOT use vars.ECR_REGISTRY or vars.ECR_REPOSITORY if ECR is managed by Terraform."""
+- DO NOT use vars.ECR_REGISTRY or vars.ECR_REPOSITORY if ECR is managed by Terraform.
+- CRITICAL: Every job that uses aws-actions/configure-aws-credentials@v4 MUST have `permissions: id-token: write` or OIDC will fail."""
             else:
                 ecr_guidance = """- If ECR_REGISTRY and ECR_REPOSITORY are pre-configured as GitHub variables, use:
   - ECR_REGISTRY: ${{{{ vars.ECR_REGISTRY }}}}
@@ -704,7 +711,8 @@ ECS VALUE EXTRACTION:
       ECS_SERVICE: ${{ needs.infrastructure.outputs.ecs_service }}
     run: aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE }} --force-new-deployment
 
-- DO NOT use secrets.ECS_CLUSTER or secrets.ECS_SERVICE if ECS is managed by Terraform."""
+- DO NOT use secrets.ECS_CLUSTER or secrets.ECS_SERVICE if ECS is managed by Terraform.
+- CRITICAL: Every job that uses aws-actions/configure-aws-credentials@v4 MUST have `permissions: id-token: write` or OIDC will fail."""
             else:
                 ecs_guidance = """- If ECS_CLUSTER and ECS_SERVICE are pre-configured as GitHub secrets, use:
   - ECS_CLUSTER: ${{{{ secrets.ECS_CLUSTER }}}}
