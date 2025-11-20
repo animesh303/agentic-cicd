@@ -1,16 +1,26 @@
 Based on this repository analysis: {repo_analysis}, design a CI/CD pipeline with appropriate stages for build, test, scan, container build, ECR push, and ECS deployment.
 
-SECURITY SCANNING STAGES (REQUIRED):
-Include security scanning stages using freely available tools:
-- SAST: Semgrep (pip install semgrep, run: semgrep --config auto .)
-- SCA: Trivy filesystem scanner (trivy fs --scanners vuln .)
-- Secrets: Trivy secrets scanner (trivy fs --scanners secret .)
-- IaC Security: Trivy config scanner (trivy config .) AND Checkov (pip install checkov, run: checkov -d .)
+QUALITY AND SECURITY SCANNING STAGES (REQUIRED - PARALLEL JOBS):
+Design quality and security scanning as SEPARATE PARALLEL JOBS that run simultaneously. This improves pipeline speed and allows independent execution.
 
-CRITICAL: All security scans must use `continue-on-error: true` or `|| true` to prevent workflow failures. Security scans are informational only.
+CRITICAL: Split quality checks into multiple parallel jobs, NOT a single combined job.
+
+Required parallel jobs:
+1. SAST Job: Semgrep (pip install semgrep, run: semgrep --config auto .)
+2. SCA Job: Trivy filesystem scanner (trivy fs --scanners vuln .)
+3. Secrets Scan Job: Trivy secrets scanner (trivy fs --scanners secret .)
+4. IaC Security Job: Trivy config scanner (trivy config .) AND Checkov (pip install checkov, run: checkov -d .)
+
+CRITICAL: 
+- All quality/security jobs must run in PARALLEL (no dependencies between them)
+- All security scans must use `continue-on-error: true` or `|| true` to prevent workflow failures
+- Security scans are informational only and should never block the pipeline
+- Infrastructure job should depend on ALL quality jobs completing: needs: [sast, sca, secrets-scan, iac-scan]
 
 IMPORTANT SEQUENCING CONSIDERATIONS:
+- Quality/security jobs (sast, sca, secrets-scan, iac-scan) run in PARALLEL with no dependencies between them
 - If ECR resources are created by Terraform, infrastructure deployment MUST happen BEFORE container build
-- Job dependencies must be properly sequenced: quality/security → infrastructure (if ECR in Terraform) → container build → application deployment
+- Job dependencies must be properly sequenced: [sast, sca, secrets-scan, iac-scan] (parallel) → infrastructure (if ECR in Terraform) → container build → application deployment
+- Infrastructure job must wait for ALL quality jobs: needs: [sast, sca, secrets-scan, iac-scan]
 - Terraform setup (CLI configuration) must occur BEFORE any terraform commands (init, plan, apply)
 

@@ -636,9 +636,21 @@ ECR VALUE EXTRACTION:
 
 WORKFLOW STRUCTURE:
 jobs:
+  sast:
+    runs-on: ubuntu-latest
+    # Runs in parallel with other quality jobs
+  sca:
+    runs-on: ubuntu-latest
+    # Runs in parallel with other quality jobs
+  secrets-scan:
+    runs-on: ubuntu-latest
+    # Runs in parallel with other quality jobs
+  iac-scan:
+    runs-on: ubuntu-latest
+    # Runs in parallel with other quality jobs
   infrastructure:
     runs-on: ubuntu-latest
-    needs: [quality, security]  # or appropriate dependencies
+    needs: [sast, sca, secrets-scan, iac-scan]  # Waits for all quality jobs
     permissions:
       id-token: write  # REQUIRED for OIDC authentication
       contents: read   # Required for checkout

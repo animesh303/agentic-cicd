@@ -63,47 +63,112 @@ CRITICAL: OIDC PERMISSIONS REQUIREMENT (MUST INCLUDE):
 - EVERY job that uses aws-actions/configure-aws-credentials@v4 MUST have these permissions
 - If a job uses AWS credentials, it MUST have `id-token: write` permission or OIDC will fail
 
-SECURITY SCANNING REQUIREMENTS (MANDATORY):
-All security scans must use freely available, locally installable tools and MUST NOT fail the workflow:
+QUALITY AND SECURITY SCANNING REQUIREMENTS (MANDATORY - PARALLEL JOBS):
+All quality and security scans must be split into SEPARATE PARALLEL JOBS that run simultaneously. This improves pipeline speed and allows independent execution of each scan type.
 
-1. SAST (Static Application Security Testing) - Use Semgrep:
-   - name: Run Semgrep SAST
-     continue-on-error: true
-     run: |
-       pip install semgrep
-       semgrep --config auto . || true
+CRITICAL: Create separate parallel jobs for each scan type. DO NOT combine them into a single "quality" job.
 
-2. SCA (Software Composition Analysis) - Use Trivy:
-   - name: Trivy SCA (Filesystem)
-     continue-on-error: true
-     run: |
-       trivy fs --scanners vuln . || true
+Required parallel jobs (all run in parallel, no dependencies between them):
 
-3. Secrets Scanning - Use Trivy:
-   - name: Trivy Secrets Scan
-     continue-on-error: true
-     run: |
-       trivy fs --scanners secret . || true
+1. SAST Job (Static Application Security Testing) - Use Semgrep:
+   - Job name: `sast` or `sast-scan`
+   - Tool: Semgrep
+   - Example job structure:
+     sast:
+       runs-on: ubuntu-latest
+       permissions:
+         contents: read
+       steps:
+         - uses: actions/checkout@v3
+         - name: Install Semgrep
+           run: pip install semgrep
+         - name: Run Semgrep SAST
+           continue-on-error: true
+           run: semgrep --config auto . || true
 
-4. IaC Security Scanning - Use Trivy AND Checkov:
-   - name: Trivy IaC Scan
-     continue-on-error: true
-     run: |
-       trivy config . || true
-   
-   - name: Run Checkov
-     continue-on-error: true
-     run: |
-       pip install checkov
-       checkov -d . || true
+2. SCA Job (Software Composition Analysis) - Use Trivy:
+   - Job name: `sca` or `sca-scan`
+   - Tool: Trivy filesystem scanner
+   - Example job structure:
+     sca:
+       runs-on: ubuntu-latest
+       permissions:
+         contents: read
+       steps:
+         - uses: actions/checkout@v3
+         - name: Install Trivy
+           run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.47.0
+         - name: Trivy SCA (Filesystem)
+           continue-on-error: true
+           run: trivy fs --scanners vuln . || true
 
-CRITICAL: Every security scan step MUST include `continue-on-error: true` OR append `|| true` to the command. Security scans are informational and should never block the pipeline.
+3. Secrets Scanning Job - Use Trivy:
+   - Job name: `secrets-scan` or `secrets`
+   - Tool: Trivy secrets scanner
+   - Example job structure:
+     secrets-scan:
+       runs-on: ubuntu-latest
+       permissions:
+         contents: read
+       steps:
+         - uses: actions/checkout@v3
+         - name: Install Trivy
+           run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.47.0
+         - name: Trivy Secrets Scan
+           continue-on-error: true
+           run: trivy fs --scanners secret . || true
+
+4. IaC Security Scanning Job - Use Trivy AND Checkov:
+   - Job name: `iac-scan` or `iac-security`
+   - Tools: Trivy config scanner AND Checkov
+   - Example job structure:
+     iac-scan:
+       runs-on: ubuntu-latest
+       permissions:
+         contents: read
+       steps:
+         - uses: actions/checkout@v3
+         - name: Install Trivy
+           run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.47.0
+         - name: Install Checkov
+           run: pip install checkov
+         - name: Trivy IaC Scan
+           continue-on-error: true
+           run: trivy config . || true
+         - name: Run Checkov
+           continue-on-error: true
+           run: checkov -d . || true
+
+CRITICAL REQUIREMENTS:
+- All quality/security jobs MUST run in PARALLEL (no `needs:` dependencies between them)
+- Each job MUST include `continue-on-error: true` OR append `|| true` to commands
+- Security scans are informational and should never block the pipeline
+- All jobs require `permissions: contents: read` for checkout
+- Infrastructure job should depend on ALL quality jobs: `needs: [sast, sca, secrets-scan, iac-scan]`
 
 CRITICAL JOB SEQUENCING RULES:
+- Quality/security jobs (sast, sca, secrets-scan, iac-scan) run in PARALLEL with no dependencies between them
 - If Terraform creates ECR resources, infrastructure job MUST run BEFORE container build job
 - Use job dependencies (needs:) to enforce proper sequencing
-- Infrastructure job should depend on quality/security checks
+- Infrastructure job should depend on ALL quality/security jobs: `needs: [sast, sca, secrets-scan, iac-scan]`
 - Container build job should depend on infrastructure job when ECR is in Terraform
+- Example correct sequencing:
+  jobs:
+    sast:
+      runs-on: ubuntu-latest
+      # No needs: - runs in parallel
+    sca:
+      runs-on: ubuntu-latest
+      # No needs: - runs in parallel
+    secrets-scan:
+      runs-on: ubuntu-latest
+      # No needs: - runs in parallel
+    iac-scan:
+      runs-on: ubuntu-latest
+      # No needs: - runs in parallel
+    infrastructure:
+      needs: [sast, sca, secrets-scan, iac-scan]  # Waits for all quality jobs
+      runs-on: ubuntu-latest
 
 TERRAFORM SETUP REQUIREMENTS:
 - ALWAYS setup Terraform CLI (hashicorp/setup-terraform@v3) BEFORE any terraform commands
