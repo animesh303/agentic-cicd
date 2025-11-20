@@ -54,8 +54,29 @@ TERRAFORM SETUP REQUIREMENTS:
 - Use cli_config_credentials_token: ${{{{ secrets.TF_API_TOKEN }}}} if Terraform Cloud/Enterprise is used
 - Setup step must come before terraform init, plan, or apply
 
+CRITICAL: AWS CLI COMMAND FORMATTING:
+- ALL AWS CLI commands MUST be written on a SINGLE LINE
+- DO NOT split AWS CLI commands across multiple lines
+- Use single-line format even if the command is long
+- Example CORRECT format:
+  run: aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE }} --force-new-deployment
+- Example CORRECT format (with YAML literal block for multiple commands):
+  run: |
+    aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE }} --force-new-deployment
+    aws ecs wait services-stable --cluster ${{ env.ECS_CLUSTER }} --services ${{ env.ECS_SERVICE }}
+- Example INCORRECT format (DO NOT USE):
+  run: |
+    aws ecs update-service 
+      --cluster ${{ env.ECS_CLUSTER }} 
+      --service ${{ env.ECS_SERVICE }}
+- This rule applies to ALL AWS CLI commands: aws ecs, aws ecr, aws sts, aws s3, etc.
+- Other commands (terraform, docker, etc.) can use multi-line format if needed, but AWS CLI must always be single-line
+
 ECR Configuration Handling:
 {ecr_guidance}
+
+ECS Configuration Handling:
+{ecs_guidance}
 
 Add concise comments and a README-style explanation after the YAML.
 

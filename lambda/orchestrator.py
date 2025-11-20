@@ -588,12 +588,14 @@ def lambda_handler(event, context):
                 else ""
             )
             
-            # Build ECR guidance based on Terraform analysis
+            # Build ECR and ECS guidance based on Terraform analysis
             ecr_guidance = ""
+            ecs_guidance = ""
             terraform_analysis = None
             if static_analyzer_result and static_analyzer_result.get("status") == "success":
                 terraform_analysis = static_analyzer_result.get("terraform_analysis", {})
             
+            # Build ECR guidance
             if terraform_analysis and terraform_analysis.get("has_ecr"):
                 ecr_resources = terraform_analysis.get("ecr_resources", [])
                 ecr_outputs = terraform_analysis.get("ecr_outputs", [])
@@ -664,10 +666,61 @@ jobs:
   - Deploy infrastructure first, then extract ECR values from outputs
   - Container job must depend on infrastructure job (needs: [infrastructure])"""
             
+            # Build ECS guidance
+            if terraform_analysis and terraform_analysis.get("has_ecs"):
+                ecs_resources = terraform_analysis.get("ecs_resources", [])
+                ecs_outputs = terraform_analysis.get("ecs_outputs", [])
+                
+                ecs_guidance = """CRITICAL: ECS resources are defined in Terraform. Infrastructure MUST be deployed BEFORE deploy job.
+
+JOB SEQUENCING REQUIREMENTS:
+- Create an "infrastructure" job that runs BEFORE the "deploy" job
+- The infrastructure job must:
+  1. Setup Terraform CLI (hashicorp/setup-terraform@v3 with cli_config_credentials_token) BEFORE any terraform commands
+  2. Configure AWS credentials via OIDC
+  3. Run terraform init, plan, and apply to create ECS resources
+  4. Output ECS_CLUSTER and ECS_SERVICE as job outputs
+- The deploy job must:
+  1. Depend on infrastructure job completion (use needs: [infrastructure])
+  2. Get ECS values from infrastructure job outputs or run terraform output
+  3. Use these values in ECS deployment commands
+
+ECS VALUE EXTRACTION:
+- If Terraform outputs exist for ECS, use them:
+  - Add step in infrastructure job to extract ECS outputs:
+    - name: Get ECS Details
+      id: ecs-details
+      run: |
+        echo "cluster=$(terraform output -raw ecs_cluster)" >> $GITHUB_OUTPUT
+        echo "service=$(terraform output -raw ecs_service)" >> $GITHUB_OUTPUT
+  - Add to infrastructure job outputs section:
+    outputs:
+      ecs_cluster: ${{ steps.ecs-details.outputs.cluster }}
+      ecs_service: ${{ steps.ecs-details.outputs.service }}
+- In deploy job, use infrastructure job outputs:
+  - name: Update ECS Service
+    env:
+      ECS_CLUSTER: ${{ needs.infrastructure.outputs.ecs_cluster }}
+      ECS_SERVICE: ${{ needs.infrastructure.outputs.ecs_service }}
+    run: aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE }} --force-new-deployment
+
+- DO NOT use secrets.ECS_CLUSTER or secrets.ECS_SERVICE if ECS is managed by Terraform."""
+            else:
+                ecs_guidance = """- If ECS_CLUSTER and ECS_SERVICE are pre-configured as GitHub secrets, use:
+  - ECS_CLUSTER: ${{{{ secrets.ECS_CLUSTER }}}}
+  - ECS_SERVICE: ${{{{ secrets.ECS_SERVICE }}}}
+
+- If ECS resources are created by Terraform:
+  - Infrastructure job MUST run before deploy job
+  - Setup Terraform CLI (with cli_config_credentials_token) BEFORE any terraform commands
+  - Deploy infrastructure first, then extract ECS values from outputs
+  - Deploy job must depend on infrastructure job (needs: [infrastructure])"""
+            
             base_prompt = format_prompt(
                 "yaml_generator_base",
                 pipeline_design=pipeline_design,
                 ecr_guidance=ecr_guidance,
+                ecs_guidance=ecs_guidance,
             )
 
             max_yaml_attempts = 2

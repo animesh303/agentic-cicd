@@ -218,6 +218,108 @@ def analyze_terraform_ecr(tmpdir):
             'error': str(e)
         }
 
+def analyze_terraform_ecs(tmpdir):
+    """
+    Analyze Terraform files to detect ECS clusters and services.
+    Returns ECS cluster name, service name, and output references if found.
+    """
+    ecs_resources = []
+    ecs_outputs = []
+    
+    try:
+        # Find all Terraform files
+        terraform_files = []
+        for root, dirs, files in os.walk(tmpdir):
+            for f in files:
+                if f.endswith('.tf') or f.endswith('.tf.json'):
+                    terraform_files.append(os.path.join(root, f))
+        
+        for tf_file in terraform_files:
+            try:
+                with open(tf_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                    
+                    # Look for ECS cluster resources
+                    # Pattern: resource "aws_ecs_cluster" "name" { ... }
+                    cluster_pattern = r'resource\s+"aws_ecs_cluster"\s+"([^"]+)"\s*\{[^}]*name\s*=\s*["\']([^"\']+)["\']'
+                    cluster_matches = re.finditer(cluster_pattern, content, re.MULTILINE | re.DOTALL)
+                    
+                    for match in cluster_matches:
+                        resource_name = match.group(1)
+                        cluster_name = match.group(2)
+                        ecs_resources.append({
+                            'resource_type': 'cluster',
+                            'resource_name': resource_name,
+                            'name': cluster_name,
+                            'file': os.path.relpath(tf_file, tmpdir)
+                        })
+                    
+                    # Look for ECS service resources
+                    # Pattern: resource "aws_ecs_service" "name" { ... cluster = ... name = ... }
+                    service_pattern = r'resource\s+"aws_ecs_service"\s+"([^"]+)"\s*\{[^}]*cluster\s*=\s*([^,\n}]+)[^}]*name\s*=\s*["\']([^"\']+)["\']'
+                    service_matches = re.finditer(service_pattern, content, re.MULTILINE | re.DOTALL)
+                    
+                    for match in service_matches:
+                        resource_name = match.group(1)
+                        cluster_ref = match.group(2).strip()
+                        service_name = match.group(3)
+                        ecs_resources.append({
+                            'resource_type': 'service',
+                            'resource_name': resource_name,
+                            'name': service_name,
+                            'cluster_reference': cluster_ref,
+                            'file': os.path.relpath(tf_file, tmpdir)
+                        })
+                    
+                    # Look for ECS outputs
+                    # Pattern: output "ecs_cluster" { value = ... }
+                    # Pattern: output "ecs_service" { value = ... }
+                    output_pattern = r'output\s+"([^"]+)"\s*\{[^}]*value\s*=\s*([^}]+)\}'
+                    output_matches = re.finditer(output_pattern, content, re.MULTILINE | re.DOTALL)
+                    
+                    for match in output_matches:
+                        output_name = match.group(1).lower()
+                        output_value = match.group(2).strip()
+                        
+                        # Check if this is an ECS-related output
+                        if 'ecs' in output_name and ('cluster' in output_name or 'service' in output_name):
+                            # Try to extract the actual value or reference
+                            value_ref = None
+                            if 'aws_ecs_cluster' in output_value:
+                                # Extract resource reference like aws_ecs_cluster.example.name
+                                ref_match = re.search(r'aws_ecs_cluster\.([^.]+)\.(name|id|arn)', output_value)
+                                if ref_match:
+                                    value_ref = f"aws_ecs_cluster.{ref_match.group(1)}.{ref_match.group(2)}"
+                            elif 'aws_ecs_service' in output_value:
+                                # Extract resource reference like aws_ecs_service.example.name
+                                ref_match = re.search(r'aws_ecs_service\.([^.]+)\.(name|id)', output_value)
+                                if ref_match:
+                                    value_ref = f"aws_ecs_service.{ref_match.group(1)}.{ref_match.group(2)}"
+                            
+                            ecs_outputs.append({
+                                'output_name': match.group(1),
+                                'output_value': output_value,
+                                'value_reference': value_ref,
+                                'file': os.path.relpath(tf_file, tmpdir)
+                            })
+            except Exception as e:
+                print(f"Error analyzing Terraform file {tf_file}: {e}")
+                continue
+        
+        return {
+            'ecs_resources': ecs_resources,
+            'ecs_outputs': ecs_outputs,
+            'has_ecs': len(ecs_resources) > 0 or len(ecs_outputs) > 0
+        }
+    except Exception as e:
+        print(f"Error in analyze_terraform_ecs: {e}")
+        return {
+            'ecs_resources': [],
+            'ecs_outputs': [],
+            'has_ecs': False,
+            'error': str(e)
+        }
+
 def detect_test_files(repo_dir):
     """Detect test files and test directories"""
     test_files = []
@@ -565,7 +667,13 @@ def lambda_handler(event, context):
         
         # Analyze Terraform for ECR resources
         if 'terraform' in analysis_types or 'infrastructure' in analysis_types:
-            results['terraform_analysis'] = analyze_terraform_ecr(tmpdir)
+            # Analyze both ECR and ECS resources
+            ecr_analysis = analyze_terraform_ecr(tmpdir)
+            ecs_analysis = analyze_terraform_ecs(tmpdir)
+            results['terraform_analysis'] = {
+                **ecr_analysis,
+                **ecs_analysis
+            }
         
         results['status'] = 'success'
         
