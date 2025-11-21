@@ -1,6 +1,0 @@
-{
-  "task_id": "test-task-1763060402",
-  "repo_url": "https://github.com/octocat/Hello-World",
-  "branch": "main",
-  "agent_ids": {"feedback":"244LZBXL4Q","pipeline_designer":"C4JVO9HIJC","pr_manager":"8UOGAI8ZQO","repo_scanner":"XXKUPYHTWM","security_compliance":"7QPAVZUU9U","yaml_generator":"CN0XA2K5QB"}
-}
