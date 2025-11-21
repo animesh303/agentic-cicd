@@ -22,6 +22,41 @@ resource "aws_s3_bucket" "templates" {
   }
 }
 
+# S3 bucket for CI/CD artifacts (agent outputs, analysis results, generated workflows)
+resource "aws_s3_bucket" "artifacts" {
+  bucket        = "${var.project_prefix}-artifacts-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
+  tags = {
+    Name = "${var.project_prefix}-artifacts"
+  }
+}
+
+# Enable versioning on artifacts bucket for history tracking
+resource "aws_s3_bucket_versioning" "artifacts_versioning" {
+  bucket = aws_s3_bucket.artifacts.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# Lifecycle policy for artifacts bucket (optional - keep artifacts for 90 days)
+resource "aws_s3_bucket_lifecycle_configuration" "artifacts_lifecycle" {
+  bucket = aws_s3_bucket.artifacts.id
+
+  rule {
+    id     = "delete_old_artifacts"
+    status = "Enabled"
+
+    expiration {
+      days = 90
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+}
+
 # DynamoDB table for task tracking
 resource "aws_dynamodb_table" "task_tracking" {
   name         = "${var.project_prefix}-tasks"
@@ -68,6 +103,11 @@ resource "aws_iam_policy" "lambda_extra_policy" {
         Effect   = "Allow",
         Action   = ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
         Resource = [aws_s3_bucket.templates.arn, "${aws_s3_bucket.templates.arn}/*"]
+      },
+      {
+        Effect   = "Allow",
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:DeleteObject"],
+        Resource = [aws_s3_bucket.artifacts.arn, "${aws_s3_bucket.artifacts.arn}/*"]
       },
       {
         Effect   = "Allow",
@@ -304,6 +344,7 @@ resource "aws_lambda_function" "orchestrator" {
       STATIC_ANALYZER_FUNCTION_NAME    = aws_lambda_function.static_analyzer.function_name
       TEMPLATE_VALIDATOR_FUNCTION_NAME = aws_lambda_function.template_validator.function_name
       GITHUB_API_FUNCTION_NAME         = aws_lambda_function.github_api.function_name
+      S3_ARTIFACT_BUCKET               = aws_s3_bucket.artifacts.id
     }
   }
   depends_on = [

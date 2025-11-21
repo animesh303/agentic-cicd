@@ -30,6 +30,7 @@ bedrock_agent_runtime = boto3.client(
 )
 lambda_client = boto3.client("lambda", region_name=AWS_REGION)
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
+s3_client = boto3.client("s3", region_name=AWS_REGION)
 
 # Initialize DynamoDB table for task tracking (create separately in Terraform)
 TASK_TABLE_NAME = os.environ.get("TASK_TABLE_NAME", "agentic-cicd-tasks")
@@ -38,6 +39,7 @@ REPO_INGESTOR_FUNCTION_NAME = os.environ.get("REPO_INGESTOR_FUNCTION_NAME")
 STATIC_ANALYZER_FUNCTION_NAME = os.environ.get("STATIC_ANALYZER_FUNCTION_NAME")
 TEMPLATE_VALIDATOR_FUNCTION_NAME = os.environ.get("TEMPLATE_VALIDATOR_FUNCTION_NAME")
 GITHUB_API_FUNCTION_NAME = os.environ.get("GITHUB_API_FUNCTION_NAME")
+S3_ARTIFACT_BUCKET = os.environ.get("S3_ARTIFACT_BUCKET", "agentic-cicd-artifacts")
 
 
 def create_task_record(task_id, repo_url, status="in_progress"):
@@ -56,6 +58,45 @@ def create_task_record(task_id, repo_url, status="in_progress"):
     except Exception as e:
         # Table might not exist, log but continue
         print(f"Warning: Could not write to DynamoDB: {e}")
+
+
+def upload_artifact_to_s3(task_id, step_name, artifact_data, artifact_type="json"):
+    """Upload artifact to S3 for troubleshooting and debugging"""
+    if not S3_ARTIFACT_BUCKET:
+        print(f"Warning: S3_ARTIFACT_BUCKET not configured, skipping artifact upload for {step_name}")
+        return None
+    
+    try:
+        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+        # S3 path: artifacts/{task_id}/{step_name}/{timestamp}.{extension}
+        s3_key = f"artifacts/{task_id}/{step_name}/{timestamp}.{artifact_type}"
+        
+        # Convert data to string if it's not already
+        if isinstance(artifact_data, (dict, list)):
+            content = json.dumps(artifact_data, indent=2, default=str)
+            content_type = "application/json"
+        else:
+            content = str(artifact_data)
+            content_type = "text/plain"
+        
+        s3_client.put_object(
+            Bucket=S3_ARTIFACT_BUCKET,
+            Key=s3_key,
+            Body=content.encode('utf-8'),
+            ContentType=content_type,
+            Metadata={
+                "task_id": task_id,
+                "step_name": step_name,
+                "timestamp": timestamp
+            }
+        )
+        
+        s3_url = f"s3://{S3_ARTIFACT_BUCKET}/{s3_key}"
+        print(f"Uploaded artifact for {step_name} to {s3_url}")
+        return s3_url
+    except Exception as e:
+        print(f"Warning: Could not upload artifact to S3 for {step_name}: {e}")
+        return None
 
 
 def update_task_status(task_id, status, result=None):
@@ -161,6 +202,11 @@ def invoke_agent(agent_id, agent_alias_id, session_id, input_text, max_retries=2
             print(
                 f"Agent {agent_id} completed with {chunk_count} chunks, response length: {len(completion)}"
             )
+            # Log last 200 chars to detect truncation
+            if len(completion) > 200:
+                print(f"Response ends with: ...{completion[-200:]}")
+            else:
+                print(f"Full response: {completion}")
             if action_group_invocations:
                 print(f"Action group invocations: {len(action_group_invocations)}")
                 for inv in action_group_invocations:
@@ -232,12 +278,21 @@ def extract_yaml_content(text):
     if not text:
         return ""
 
+    # Try to find fenced code block - use greedy match to get everything until the last ```
     fenced_match = re.search(
-        r"```(?:yaml)?\s*\n(.*?)\n```", text, re.DOTALL | re.IGNORECASE
+        r"```(?:yaml)?\s*\n(.*?)(?:\n```|$)", text, re.DOTALL | re.IGNORECASE
     )
     if fenced_match:
-        return fenced_match.group(1).strip()
+        yaml_content = fenced_match.group(1).strip()
+        # If the content doesn't end with ```, it might be incomplete
+        # Check if there's a closing ``` after our match
+        remaining_text = text[fenced_match.end():]
+        if "```" not in remaining_text[:100]:  # Check if closing ``` is nearby
+            # Might be incomplete, but return what we have
+            print(f"Warning: YAML code block might be incomplete (no closing ``` found nearby)")
+        return yaml_content
 
+    # Fallback: extract YAML lines
     yaml_lines = []
     capturing = False
     for line in text.splitlines():
@@ -248,6 +303,105 @@ def extract_yaml_content(text):
             yaml_lines.append(line)
 
     return "\n".join(yaml_lines).strip()
+
+
+def is_yaml_complete(yaml_content):
+    """Check if YAML content appears complete (not truncated mid-line or mid-block)."""
+    if not yaml_content:
+        return False
+    
+    # Check for common signs of incomplete YAML:
+    # 1. Last line doesn't end with newline and is incomplete (ends with $ or incomplete quote)
+    lines = yaml_content.splitlines()
+    if lines:
+        last_line = lines[-1].strip()
+        # Check if last line looks incomplete
+        if last_line and not last_line.endswith((':', '-', ']', '}', '>', '|')):
+            # Check if it ends with incomplete string or variable reference
+            if last_line.endswith('${{') or last_line.endswith('${{ needs') or last_line.endswith('${{ vars') or last_line.endswith('${{ secrets'):
+                print(f"Warning: YAML appears incomplete - last line ends with incomplete variable reference: {last_line[-50:]}")
+                return False
+            # Check if it ends mid-string (unclosed quote)
+            if last_line.count('"') % 2 != 0 or last_line.count("'") % 2 != 0:
+                print(f"Warning: YAML appears incomplete - last line has unclosed quotes: {last_line[-50:]}")
+                return False
+    
+    # Check for balanced braces/brackets in last few lines
+    last_50_chars = yaml_content[-50:]
+    open_braces = last_50_chars.count('{')
+    close_braces = last_50_chars.count('}')
+    if open_braces > close_braces:
+        print(f"Warning: YAML appears incomplete - unclosed braces in last 50 chars")
+        return False
+    
+    # Enhanced checks for workflow completeness
+    # Check if deploy job exists and is complete
+    if "deploy:" in yaml_content.lower():
+        deploy_section = yaml_content[yaml_content.lower().rfind("deploy:"):]
+        # Check if deploy job has actual deployment steps (not just validation)
+        # Should have ECS update command or similar deployment action
+        has_deployment_action = any(keyword in deploy_section.lower() for keyword in [
+            "aws ecs update-service",
+            "aws ecs deploy",
+            "ecs update-service",
+            "update-service",
+            "force-new-deployment",
+            "deploy",
+            "update service"
+        ])
+        if not has_deployment_action:
+            # Check last 200 chars of deploy section to see if it ends mid-step
+            last_200 = deploy_section[-200:].lower()
+            # If it ends with validation/error checking but no actual deployment, it's incomplete
+            if "exit 1" in last_200 or "error:" in last_200:
+                # Check if there's more content after the error check
+                # If the last meaningful line is just error checking, it's likely incomplete
+                last_lines = [l.strip() for l in deploy_section.splitlines() if l.strip() and not l.strip().startswith('#')]
+                if last_lines:
+                    last_meaningful = last_lines[-1].lower()
+                    # If last line is just error handling without deployment action, likely incomplete
+                    if any(phrase in last_meaningful for phrase in ["exit 1", "echo \"error", "if [[ -z"]):
+                        # Check if there's an ECS update command anywhere in deploy section
+                        if "ecs" not in deploy_section.lower() or "update" not in deploy_section.lower():
+                            print(f"Warning: YAML deploy job appears incomplete - ends with validation but no deployment action found")
+                            print(f"Last 100 chars of deploy section: {deploy_section[-100:]}")
+                            return False
+    
+    # Check if last step in any job appears incomplete (ends mid-command)
+    # Look for run: blocks that don't seem to close properly
+    last_300_chars = yaml_content[-300:]
+    # If we're in a run: | block, check if it's properly closed
+    if "run: |" in last_300_chars or "run:" in last_300_chars:
+        # Count indentation of last non-empty line
+        non_empty_lines = [l for l in lines if l.strip()]
+        if non_empty_lines:
+            last_non_empty = non_empty_lines[-1]
+            # If last line has significant indentation (more than 8 spaces), might be mid-block
+            if len(last_non_empty) - len(last_non_empty.lstrip()) > 8:
+                # Check if it looks like it should continue (ends with backslash, pipe, or incomplete command)
+                stripped = last_non_empty.strip()
+                if stripped.endswith('\\') or stripped.endswith('|') or (stripped and not any(stripped.endswith(term) for term in [':', '-', ']', '}', 'fi', 'done', 'esac'])):
+                    # But allow if it's a complete command ending
+                    if not any(stripped.endswith(term) for term in ['|| true', '|| false', ';', '&']):
+                        # Check if next expected line would be at same or less indentation
+                        # This is a heuristic - if we're deep in a block and line doesn't end properly, might be truncated
+                        print(f"Warning: YAML might be incomplete - last line appears to be mid-block: {stripped[-50:]}")
+                        # Don't fail on this alone, but log it
+    
+    # Final check: ensure workflow has reasonable length (truncated workflows are usually short)
+    # A complete workflow with multiple jobs should be at least 150 lines
+    if len(lines) < 150 and ("deploy:" in yaml_content.lower() or "build:" in yaml_content.lower()):
+        # Check if deploy job is present but seems short
+        if "deploy:" in yaml_content.lower():
+            deploy_start = yaml_content.lower().rfind("deploy:")
+            deploy_content = yaml_content[deploy_start:]
+            deploy_lines = [l for l in deploy_content.splitlines() if l.strip() and not l.strip().startswith('#')]
+            # Deploy job should have at least 10-15 meaningful lines (steps, commands, etc.)
+            if len(deploy_lines) < 10:
+                print(f"Warning: YAML deploy job appears too short ({len(deploy_lines)} lines) - might be incomplete")
+                return False
+    
+    return True
 
 
 def _normalize_github_lambda_response(response):
@@ -427,6 +581,8 @@ def lambda_handler(event, context):
             workflow_steps.append(
                 {"step": "repo_ingestor", "result": repo_ingestion_result}
             )
+            # Upload artifact to S3
+            upload_artifact_to_s3(task_id, "repo_ingestor", repo_ingestion_result)
             # Update DynamoDB with current progress
             update_task_status(task_id, "in_progress", {"steps": workflow_steps})
             if repo_ingestion_result.get("status") != "success":
@@ -467,10 +623,14 @@ def lambda_handler(event, context):
                 agent_ids["repo_scanner"], AGENT_ALIAS_ID, session_id, input_text
             )
             workflow_steps.append({"step": "repo_scanner", "result": result})
+            # Upload artifact to S3
+            upload_artifact_to_s3(task_id, "repo_scanner", result)
             # Update DynamoDB with current progress
             update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
             if result.get("status") != "success":
+                # Upload error artifact
+                upload_artifact_to_s3(task_id, "repo_scanner_error", result)
                 update_task_status(
                     task_id,
                     "failed",
@@ -498,6 +658,8 @@ def lambda_handler(event, context):
             workflow_steps.append(
                 {"step": "static_analyzer", "result": static_analyzer_result}
             )
+            # Upload artifact to S3
+            upload_artifact_to_s3(task_id, "static_analyzer", static_analyzer_result)
             # Update DynamoDB with current progress
             update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
@@ -558,6 +720,8 @@ def lambda_handler(event, context):
             )
             workflow_steps.append({"step": "pipeline_designer", "result": result})
             pipeline_design_result = result
+            # Upload artifact to S3
+            upload_artifact_to_s3(task_id, "pipeline_designer", result)
             # Update DynamoDB with current progress
             update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
@@ -593,6 +757,8 @@ def lambda_handler(event, context):
             )
             workflow_steps.append({"step": "security_compliance", "result": result})
             security_recommendations = result.get("completion", "")
+            # Upload artifact to S3
+            upload_artifact_to_s3(task_id, "security_compliance", result)
             # Update DynamoDB with current progress
             update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
@@ -705,19 +871,32 @@ def lambda_handler(event, context):
                 terraform_working_dir=terraform_working_dir,
             )
 
-            max_yaml_attempts = 2
+            max_yaml_attempts = 3
             yaml_content = ""
+            validation_errors = None
 
             for attempt in range(1, max_yaml_attempts + 1):
                 session_id = f"{task_id}-yaml-generator-attempt-{attempt}"
-                prompt = (
-                    base_prompt
-                    if attempt == 1
-                    else format_prompt(
+                
+                # Build prompt with validation errors if this is a retry after validation failure
+                if attempt == 1:
+                    prompt = base_prompt
+                elif validation_errors:
+                    # Retry with validation errors feedback
+                    prompt = format_prompt(
                         "yaml_generator_retry",
                         base_prompt=base_prompt,
+                        validation_errors=validation_errors,
+                        previous_yaml=yaml_content[:500] if yaml_content else "",
                     )
-                )
+                else:
+                    # Retry without validation errors (e.g., empty YAML)
+                    prompt = format_prompt(
+                        "yaml_generator_retry",
+                        base_prompt=base_prompt,
+                        validation_errors="The previous attempt did not produce valid YAML content. Ensure the workflow includes all required fields for every job (`runs-on:`, `steps:`).",
+                        previous_yaml="",
+                    )
 
                 result = invoke_agent(
                     agent_ids["yaml_generator"], AGENT_ALIAS_ID, session_id, prompt
@@ -725,11 +904,15 @@ def lambda_handler(event, context):
                 workflow_steps.append(
                     {"step": f"yaml_generator_attempt_{attempt}", "result": result}
                 )
+                # Upload artifact to S3
+                upload_artifact_to_s3(task_id, f"yaml_generator_attempt_{attempt}", result)
                 # Update DynamoDB with current progress
                 update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
                 if result.get("status") != "success":
                     if attempt == max_yaml_attempts:
+                        # Upload error artifact
+                        upload_artifact_to_s3(task_id, "yaml_generator_final_error", result)
                         update_task_status(
                             task_id,
                             "failed",
@@ -750,18 +933,163 @@ def lambda_handler(event, context):
                     continue
 
                 raw_yaml_output = result.get("completion", "")
+                print(f"Raw agent response length: {len(raw_yaml_output)}")
+                # Check if response might be truncated (ends abruptly without closing code fence)
+                if raw_yaml_output and not raw_yaml_output.rstrip().endswith("```"):
+                    # Check if it contains a YAML code block that's not closed
+                    if "```yaml" in raw_yaml_output or "```" in raw_yaml_output:
+                        yaml_blocks = raw_yaml_output.count("```")
+                        if yaml_blocks % 2 != 0:  # Odd number means unclosed block
+                            print(f"WARNING: Agent response appears truncated - unclosed code block detected")
+                            print(f"Response ends with: ...{raw_yaml_output[-300:]}")
+                
                 yaml_content = extract_yaml_content(raw_yaml_output)
                 print(f"Extracted YAML content length: {len(yaml_content)}")
                 if yaml_content:
-                    print(f"YAML preview: {yaml_content[:200]}")
+                    print(f"YAML preview (first 200 chars): {yaml_content[:200]}")
+                    print(f"YAML preview (last 200 chars): {yaml_content[-200:]}")
 
-                if yaml_content and len(yaml_content.strip()) >= 50:
+                if not yaml_content or len(yaml_content.strip()) < 50:
+                    print(
+                        f"YAML generator attempt {attempt} did not include a usable workflow (length={len(yaml_content)})."
+                    )
+                    validation_errors = None
+                    yaml_content = ""
+                    if attempt == max_yaml_attempts:
+                        update_task_status(
+                            task_id,
+                            "failed",
+                            {
+                                "error": "YAML content is empty or too short",
+                                "step": "yaml_generator",
+                                "steps": workflow_steps,
+                            },
+                        )
+                        return {
+                            "status": "error",
+                            "message": "YAML content is empty or too short",
+                            "steps": workflow_steps,
+                        }
+                    continue
+                
+                # Check if YAML appears complete (not truncated)
+                if not is_yaml_complete(yaml_content):
+                    print(f"YAML generator attempt {attempt} produced incomplete YAML (appears truncated).")
+                    # Check what's missing to provide specific feedback
+                    missing_parts = []
+                    if "deploy:" in yaml_content.lower():
+                        deploy_section = yaml_content[yaml_content.lower().rfind("deploy:"):]
+                        if "aws ecs update-service" not in deploy_section.lower() and "ecs update-service" not in deploy_section.lower():
+                            missing_parts.append("The deploy job is missing the actual ECS deployment command (e.g., `aws ecs update-service --cluster ... --service ... --force-new-deployment`)")
+                        if deploy_section.count("run:") < 2:  # Should have at least 2 run steps (credentials + deployment)
+                            missing_parts.append("The deploy job appears to have incomplete steps")
+                    
+                    # Check if workflow ends mid-step
+                    last_lines = [l.strip() for l in yaml_content.splitlines()[-10:] if l.strip()]
+                    if last_lines:
+                        last_line = last_lines[-1]
+                        if any(phrase in last_line.lower() for phrase in ["exit 1", "echo \"error", "if [[ -z"]):
+                            missing_parts.append("The workflow appears to end mid-step - ensure all steps are complete and the deploy job includes the actual deployment command")
+                    
+                    error_msg = "YAML content appears incomplete or truncated. "
+                    if missing_parts:
+                        error_msg += "CRITICAL ISSUES:\n" + "\n".join(f"- {part}" for part in missing_parts)
+                    else:
+                        error_msg += "Ensure the entire workflow is generated, including all jobs and steps. The workflow must be complete from start to finish, especially the deploy job which must include the actual ECS update-service command."
+                    
+                    validation_errors = error_msg
+                    print(f"YAML completeness check failed. Issues detected: {missing_parts}")
+                    if attempt == max_yaml_attempts:
+                        update_task_status(
+                            task_id,
+                            "failed",
+                            {
+                                "error": "YAML content is incomplete or truncated",
+                                "step": "yaml_generator",
+                                "steps": workflow_steps,
+                            },
+                        )
+                        return {
+                            "status": "error",
+                            "message": "YAML content is incomplete or truncated",
+                            "steps": workflow_steps,
+                        }
+                    continue
+
+                # Validate YAML if validator is available
+                validation_passed = True
+                if TEMPLATE_VALIDATOR_FUNCTION_NAME:
+                    validator_payload = {
+                        "yaml_content": yaml_content,
+                        "validation_level": "normal",
+                    }
+                    validator_result = invoke_lambda(
+                        TEMPLATE_VALIDATOR_FUNCTION_NAME, validator_payload
+                    )
+                    if "status" not in validator_result:
+                        validator_result["status"] = (
+                            "success"
+                            if validator_result.get("valid")
+                            else "validation_failed"
+                        )
+                    workflow_steps.append(
+                        {"step": f"template_validator_attempt_{attempt}", "result": validator_result}
+                    )
+                    # Upload artifact to S3
+                    upload_artifact_to_s3(task_id, f"template_validator_attempt_{attempt}", validator_result)
+                    # Also upload the YAML content that was validated
+                    if yaml_content:
+                        upload_artifact_to_s3(task_id, f"yaml_content_attempt_{attempt}", yaml_content, "yaml")
+                    # Update DynamoDB with current progress
+                    update_task_status(task_id, "in_progress", {"steps": workflow_steps})
+                    
+                    if not validator_result.get("valid", False):
+                        validation_passed = False
+                        summary_errors = (
+                            validator_result.get("summary", {}).get("errors")
+                            or validator_result.get("syntax", {}).get("errors")
+                            or []
+                        )
+                        validation_errors = "\n".join(summary_errors) if summary_errors else "Validation failed with unknown errors"
+                        detail = "; ".join(summary_errors[:5])
+                        print(f"Template validator errors on attempt {attempt}: {summary_errors}")
+                        print(f"Invalid YAML content:\n{yaml_content[:500]}")
+                        
+                        if attempt == max_yaml_attempts:
+                            error_msg = "Template validator reported invalid YAML" + (
+                                f": {detail}" if detail else ""
+                            )
+                            # Upload error artifact
+                            error_artifact = {
+                                "error": error_msg,
+                                "validator_result": validator_result,
+                                "yaml_content": yaml_content[:1000] if yaml_content else None,  # First 1000 chars for debugging
+                                "workflow_steps": workflow_steps
+                            }
+                            upload_artifact_to_s3(task_id, "template_validator_error", error_artifact)
+                            update_task_status(
+                                task_id,
+                                "failed",
+                                {
+                                    "error": error_msg,
+                                    "step": "template_validator",
+                                    "steps": workflow_steps,
+                                },
+                            )
+                            return {
+                                "status": "error",
+                                "message": error_msg,
+                                "steps": workflow_steps,
+                            }
+                        print(f"Validation failed on attempt {attempt} – retrying with error feedback.")
+                        continue
+                    else:
+                        print(f"Validation passed on attempt {attempt}.")
+                        validation_errors = None
+
+                # If we get here, YAML is valid and we can break
+                if validation_passed:
                     break
-
-                print(
-                    f"YAML generator attempt {attempt} did not include a usable workflow (length={len(yaml_content)})."
-                )
-                yaml_content = ""
 
             if not yaml_content:
                 update_task_status(
@@ -778,52 +1106,6 @@ def lambda_handler(event, context):
                     "message": "YAML content is empty or too short",
                     "steps": workflow_steps,
                 }
-
-            if TEMPLATE_VALIDATOR_FUNCTION_NAME:
-                validator_payload = {
-                    "yaml_content": yaml_content,
-                    "validation_level": "normal",
-                }
-                validator_result = invoke_lambda(
-                    TEMPLATE_VALIDATOR_FUNCTION_NAME, validator_payload
-                )
-                if "status" not in validator_result:
-                    validator_result["status"] = (
-                        "success"
-                        if validator_result.get("valid")
-                        else "validation_failed"
-                    )
-                workflow_steps.append(
-                    {"step": "template_validator", "result": validator_result}
-                )
-                # Update DynamoDB with current progress
-                update_task_status(task_id, "in_progress", {"steps": workflow_steps})
-                if not validator_result.get("valid", False):
-                    summary_errors = (
-                        validator_result.get("summary", {}).get("errors")
-                        or validator_result.get("syntax", {}).get("errors")
-                        or []
-                    )
-                    detail = "; ".join(summary_errors[:3])
-                    error_msg = "Template validator reported invalid YAML" + (
-                        f": {detail}" if detail else ""
-                    )
-                    print(f"Template validator errors: {summary_errors}")
-                    print(f"Invalid YAML content:\n{yaml_content}")
-                    update_task_status(
-                        task_id,
-                        "failed",
-                        {
-                            "error": error_msg,
-                            "step": "template_validator",
-                            "steps": workflow_steps,
-                        },
-                    )
-                    return {
-                        "status": "error",
-                        "message": error_msg,
-                        "steps": workflow_steps,
-                    }
             else:
                 print(
                     "Warning: TEMPLATE_VALIDATOR_FUNCTION_NAME not set, skipping YAML validation"
@@ -868,6 +1150,8 @@ def lambda_handler(event, context):
             if pr_body:
                 pr_body_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
                 pr_body = f"{pr_body}\n\n---\n**Generated at:** {pr_body_timestamp}"
+            # Upload artifact to S3
+            upload_artifact_to_s3(task_id, "pr_manager", result)
             # Update DynamoDB with current progress
             update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
@@ -902,10 +1186,16 @@ def lambda_handler(event, context):
             workflow_steps.append(
                 {"step": "github_operations", "result": github_result}
             )
+            # Upload artifact to S3
+            upload_artifact_to_s3(task_id, "github_operations", github_result)
+            # Also upload the final YAML content that was committed
+            if yaml_content:
+                upload_artifact_to_s3(task_id, "final_yaml_content", yaml_content, "yaml")
             # Update DynamoDB with current progress (final step)
             update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
             if not github_result.get("success"):
+                # Upload error artifact (already uploaded above, but ensure it's there)
                 update_task_status(
                     task_id,
                     "failed",
@@ -922,6 +1212,12 @@ def lambda_handler(event, context):
                 }
         else:
             error_msg = "YAML content missing; cannot update GitHub"
+            # Upload error artifact
+            error_artifact = {
+                "error": error_msg,
+                "workflow_steps": workflow_steps
+            }
+            upload_artifact_to_s3(task_id, "yaml_content_missing_error", error_artifact)
             update_task_status(
                 task_id,
                 "failed",
@@ -935,6 +1231,17 @@ def lambda_handler(event, context):
 
         # Update task as completed
         update_task_status(task_id, "completed", {"steps": workflow_steps})
+        
+        # Upload final summary artifact with all workflow steps
+        summary_artifact = {
+            "task_id": task_id,
+            "repo_url": repo_url,
+            "branch": branch,
+            "status": "completed",
+            "workflow_steps": workflow_steps,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        upload_artifact_to_s3(task_id, "workflow_summary", summary_artifact)
 
         return {
             "status": "success",
@@ -944,6 +1251,18 @@ def lambda_handler(event, context):
 
     except Exception as e:
         update_task_status(task_id, "failed", {"error": str(e)})
+        
+        # Upload error summary artifact
+        error_artifact = {
+            "task_id": task_id,
+            "repo_url": repo_url if 'repo_url' in locals() else "unknown",
+            "status": "failed",
+            "error": str(e),
+            "workflow_steps": workflow_steps if 'workflow_steps' in locals() else [],
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        upload_artifact_to_s3(task_id, "workflow_error_summary", error_artifact)
+        
         return {
             "status": "error",
             "message": str(e),

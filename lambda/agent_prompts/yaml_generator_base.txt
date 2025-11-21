@@ -31,6 +31,9 @@ Requirements:
 - DO NOT use AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY - use OIDC authentication only
 - Include security scanning and validation stages
 - Reference secrets via secrets.* and variables via vars.*
+- CRITICAL: Every job MUST have meaningful actions - jobs cannot be empty or incomplete
+- Deploy jobs MUST include actual deployment commands (e.g., aws ecs update-service, kubectl apply, etc.)
+- A job with only credential configuration and no actual work is INCOMPLETE and will be rejected
 
 CRITICAL: NPM SETUP (IF NPM IS USED):
 - IF npm commands MUST be included for some reason, you MUST NOT include the `cache` parameter at all
@@ -339,7 +342,43 @@ ECR Configuration Handling:
 ECS Configuration Handling:
 {ecs_guidance}
 
+CRITICAL: DEPLOY JOB COMPLETENESS:
+- The deploy job MUST include actual deployment actions - it cannot be empty or incomplete
+- A deploy job with only AWS credentials configuration is INCOMPLETE and will do nothing
+- You MUST include:
+  1. AWS credentials configuration (if needed for deployment)
+  2. Steps to set/validate deployment values (ECS cluster, service, etc.)
+  3. The actual deployment command (e.g., aws ecs update-service, kubectl apply, etc.)
+- Example of INCOMPLETE deploy job (DO NOT GENERATE THIS):
+  deploy:
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+  # ❌ This is incomplete - no deployment action!
+- Example of COMPLETE deploy job:
+  deploy:
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+      - name: Set Deployment Values
+        run: |
+          # Set and validate values
+      - name: Deploy Application
+        run: |
+          # Actual deployment command
+          aws ecs update-service --cluster $CLUSTER --service $SERVICE --force-new-deployment
+
 Add concise comments and a README-style explanation after the YAML.
 
-Return ONLY the workflow inside a ```yaml code fence followed immediately by the README text. Do not include any other prose before the YAML block.
+CRITICAL: WORKFLOW COMPLETENESS REQUIREMENTS:
+- You MUST generate the COMPLETE workflow from start to finish - this is the HIGHEST PRIORITY
+- The workflow MUST include ALL jobs with ALL their steps - completeness is more important than verbosity
+- Do NOT truncate or cut off the workflow mid-generation - if you must choose, prioritize completeness over detailed comments
+- Ensure every job is fully defined with all required fields and steps
+- The YAML code block MUST be complete - do not stop mid-line or mid-block
+- If approaching token limits, prioritize completing the workflow structure over verbose comments or explanations
+- End the YAML code block with ``` only after the complete workflow is written
+- CRITICAL: A complete but concise workflow is better than an incomplete verbose one
+
+Return ONLY the workflow inside a ```yaml code fence followed immediately by the README text. Do not include any other prose before the YAML block. The YAML MUST be complete and not truncated.
 

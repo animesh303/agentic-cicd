@@ -112,28 +112,54 @@ CORRECT PATTERN (MUST USE - USE DISCOVERED OUTPUT NAMES):
     outputs:
       ecs_cluster: ${{ steps.ecs-details.outputs.cluster }}
       ecs_service: ${{ steps.ecs-details.outputs.service }}
-- In deploy job, ALWAYS validate and set ECS values as environment variables in a separate step (consistent with ECR pattern):
-  - name: Set ECS Values
-    run: |
-      ECS_CLUSTER="${{ needs.infrastructure.outputs.ecs_cluster || vars.ECS_CLUSTER }}"
-      ECS_SERVICE="${{ needs.infrastructure.outputs.ecs_service || vars.ECS_SERVICE }}"
-      if [[ -z "$ECS_CLUSTER" ]] || [[ "$ECS_CLUSTER" == *"Error"* ]]; then
-        echo "Error: ECS_CLUSTER is not set or invalid"
-        echo "Infrastructure job output: ${{ needs.infrastructure.outputs.ecs_cluster }}"
-        exit 1
-      fi
-      if [[ -z "$ECS_SERVICE" ]] || [[ "$ECS_SERVICE" == *"Error"* ]]; then
-        echo "Error: ECS_SERVICE is not set or invalid"
-        echo "Infrastructure job output: ${{ needs.infrastructure.outputs.ecs_service }}"
-        exit 1
-      fi
-      echo "ECS_CLUSTER=$ECS_CLUSTER" >> $GITHUB_ENV
-      echo "ECS_SERVICE=$ECS_SERVICE" >> $GITHUB_ENV
-      echo "Successfully set ECS values: cluster=$ECS_CLUSTER, service=$ECS_SERVICE"
-  - name: Update ECS Service
-    run: |
-      # ECS values are now available as environment variables from previous step
-      aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --force-new-deployment
+- In deploy job, you MUST include ALL of these steps (CRITICAL - deploy job is incomplete without them):
+  1. Configure AWS Credentials (required for AWS CLI)
+  2. Set ECS Values (validate and set as environment variables)
+  3. Update ECS Service (the actual deployment action)
+  
+  Complete deploy job structure (MUST include all steps):
+  deploy:
+    needs: [build]
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION }}
+      
+      - name: Set ECS Values
+        run: |
+          ECS_CLUSTER="${{ needs.infrastructure.outputs.ecs_cluster || vars.ECS_CLUSTER }}"
+          ECS_SERVICE="${{ needs.infrastructure.outputs.ecs_service || vars.ECS_SERVICE }}"
+          if [[ -z "$ECS_CLUSTER" ]] || [[ "$ECS_CLUSTER" == *"Error"* ]]; then
+            echo "Error: ECS_CLUSTER is not set or invalid"
+            echo "Infrastructure job output: ${{ needs.infrastructure.outputs.ecs_cluster }}"
+            exit 1
+          fi
+          if [[ -z "$ECS_SERVICE" ]] || [[ "$ECS_SERVICE" == *"Error"* ]]; then
+            echo "Error: ECS_SERVICE is not set or invalid"
+            echo "Infrastructure job output: ${{ needs.infrastructure.outputs.ecs_service }}"
+            exit 1
+          fi
+          echo "ECS_CLUSTER=$ECS_CLUSTER" >> $GITHUB_ENV
+          echo "ECS_SERVICE=$ECS_SERVICE" >> $GITHUB_ENV
+          echo "Successfully set ECS values: cluster=$ECS_CLUSTER, service=$ECS_SERVICE"
+      
+      - name: Update ECS Service
+        run: |
+          # ECS values are now available as environment variables from previous step
+          aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --force-new-deployment
+      
+      # Optional: Wait for service to stabilize
+      - name: Wait for Service to Stabilize
+        continue-on-error: true
+        run: |
+          aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVICE
 
 - DO NOT use secrets.ECS_CLUSTER or secrets.ECS_SERVICE if ECS is managed by Terraform.
 - CRITICAL: Every job that uses aws-actions/configure-aws-credentials@v4 MUST have `permissions: id-token: write` or OIDC will fail.
