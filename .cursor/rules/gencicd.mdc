@@ -1,0 +1,681 @@
+---
+description: When user request to trigger workflow generation, generate workflow for current repo, create CI/CD pipeline for current repo, run workflow generation or any similar request to generate workflows
+alwaysApply: false
+---
+
+# Cursor Rules for Agentic CI/CD Workflow Generation
+
+## 🎯 Welcome Message & Process Overview
+
+When the user requests workflow generation (e.g., "trigger workflow generation", "generate workflow for [repo URL]", "create CI/CD pipeline for [repo]", "run workflow generation"), **ALWAYS START** with this welcome message:
+
+```
+╔════════════════════════════════════════════════════════════════╗
+║  🚀  Agentic CI/CD Workflow Generation System                 ║
+║  ═══════════════════════════════════════════════════════════  ║
+║                                                                ║
+║  Welcome! I'll help you generate GitHub Actions workflows     ║
+║  for your repository using our AI-powered orchestrator.        ║
+║                                                                ║
+║  📋 Process Overview:                                          ║
+║  ───────────────────────────────────────────────────────────  ║
+║  1️⃣  Prerequisites Check    → Verify AWS & Terraform setup    ║
+║  2️⃣  Repository Validation → Validate GitHub repo URL        ║
+║  3️⃣  Infrastructure Setup   → Get Terraform outputs           ║
+║  4️⃣  Task Initialization    → Generate unique task ID         ║
+║  5️⃣  Payload Creation       → Prepare Lambda payload          ║
+║  6️⃣  Workflow Trigger       → Invoke orchestrator Lambda     ║
+║  7️⃣  Progress Monitoring    → Track workflow generation       ║
+║                                                                ║
+║  ⏱️  Estimated Time: 5-15 minutes                             ║
+║  🎯  Final Output: GitHub PR with generated workflows          ║
+╚════════════════════════════════════════════════════════════════╝
+```
+
+After displaying the welcome message, **ALWAYS** ask for confirmation before proceeding:
+
+```
+✨ Ready to start? This will trigger the workflow generation process.
+   Type 'yes' or 'y' to continue, or 'no' to cancel.
+```
+
+**CRITICAL**: Do NOT proceed with any steps until the user confirms. Wait for explicit confirmation.
+
+## Workflow Generation Process
+
+### Phase 1: Prerequisites Check 🔍
+
+**Display this prompt with confirmation:**
+
+```
+🔍 Phase 1: Prerequisites Check
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+I'll verify the following prerequisites:
+  ✓ AWS CLI installed and configured
+  ✓ AWS credentials valid
+  ✓ Terraform installed
+  ✓ Terraform outputs available
+  ✓ Python/boto3 (if using Python script)
+
+⚠️  This will check your AWS credentials and Terraform setup.
+   Continue? (yes/no)
+```
+
+**After user confirmation, perform checks:**
+
+- Run `aws sts get-caller-identity` to verify AWS credentials
+- Check if `terraform` command is available
+- Verify `terraform output -json` returns valid outputs
+- If using Python script, check if `boto3` is available
+
+**Display results with colors:**
+
+- ✅ Green for success: `✅ AWS credentials valid`
+- ❌ Red for failure: `❌ AWS credentials invalid - please configure`
+- ⚠️ Yellow for warnings: `⚠️  Terraform outputs not found`
+
+**If any check fails, display error and ask:**
+
+```
+❌ Prerequisites check failed. Please fix the issues above.
+   Would you like to retry? (yes/no)
+```
+
+**Only proceed to Phase 2 if all checks pass.**
+
+### Phase 2: Repository Validation 📦
+
+**Display this prompt with confirmation:**
+
+```
+📦 Phase 2: Repository Validation
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+I'll validate the repository URL and extract:
+  • Repository owner
+  • Repository name
+  • Branch name (default: main)
+
+📝 Accepted formats:
+  • https://github.com/owner/repo
+  • git@github.com:owner/repo
+
+🚀 Ready to validate repository? (yes/no)
+```
+
+**After user confirmation:**
+
+- Extract repository URL from user request
+- Validate URL format
+- Extract owner and repo name
+- Extract branch (default: "main" if not specified)
+
+**Display validation results:**
+
+```
+✅ Repository URL validated
+   📍 Owner: <owner>
+   📍 Repository: <repo>
+   📍 Branch: <branch>
+```
+
+**If validation fails:**
+
+```
+❌ Invalid repository URL format.
+   Please provide a valid GitHub repository URL.
+   Continue? (yes/no)
+```
+
+**Only proceed to Phase 3 if validation succeeds.**
+
+### Phase 3: Infrastructure Setup 🏗️
+
+**Display this prompt with confirmation:**
+
+```
+🏗️  Phase 3: Infrastructure Setup
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+I'll retrieve Terraform outputs to get:
+  • Lambda orchestrator function name
+  • Agent IDs mapping
+  • DynamoDB table name
+  • S3 bucket name (if available)
+
+⚠️  This requires Terraform to be applied and outputs available.
+   Continue? (yes/no)
+```
+
+**After user confirmation:**
+
+- Run `terraform output -json` to get all outputs
+- Extract `lambda_orchestrator` (orchestrator Lambda function name)
+- Extract `agent_ids_map` (JSON object with agent IDs)
+- Extract `dynamodb_table` (DynamoDB table name for tracking)
+- Extract `s3_bucket` (if available)
+- Verify outputs exist before proceeding
+
+**Display results:**
+
+```
+✅ Infrastructure configuration retrieved
+   🔧 Lambda Orchestrator: <function-name>
+   🔧 DynamoDB Table: <table-name>
+   🔧 Agent IDs: <count> agents configured
+```
+
+**If outputs are missing:**
+
+```
+❌ Terraform outputs not found.
+   Please run 'terraform apply' first.
+   Would you like to retry? (yes/no)
+```
+
+**Only proceed to Phase 4 if outputs are available.**
+
+### Phase 4: Task Initialization 🎫
+
+**Display this prompt with confirmation:**
+
+```
+🎫 Phase 4: Task Initialization
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+I'll generate a unique task ID for tracking this workflow generation:
+  Format: workflow-gen-{timestamp}-{random-hex}
+
+📊 This task ID will be used to:
+  • Track progress in DynamoDB
+  • Monitor workflow generation steps
+  • Retrieve final results
+
+🚀 Generate task ID? (yes/no)
+```
+
+**After user confirmation:**
+
+- Generate task ID: `workflow-gen-{timestamp}-{random-hex}`
+- Use `date +%s` for timestamp
+- Use `openssl rand -hex 4` or similar for random component
+
+**Display generated task ID:**
+
+```
+✅ Task ID generated
+   🆔 Task ID: workflow-gen-<timestamp>-<random>
+```
+
+**Proceed to Phase 5.**
+
+### Phase 5: Payload Creation 📝
+
+**Display this prompt with confirmation:**
+
+```
+📝 Phase 5: Payload Creation
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+I'll create the Lambda payload with:
+  • Task ID
+  • Repository URL
+  • Branch name
+  • Agent IDs mapping
+
+📋 Payload structure:
+  {
+    "task_id": "<generated-task-id>",
+    "repo_url": "<repository-url>",
+    "branch": "<branch-name>",
+    "agent_ids": {
+      "repo_scanner": "<agent-id>",
+      "pipeline_designer": "<agent-id>",
+      "security_compliance": "<agent-id>",
+      "yaml_generator": "<agent-id>",
+      "pr_manager": "<agent-id>"
+    }
+  }
+
+🚀 Create payload? (yes/no)
+```
+
+**After user confirmation:**
+
+- Create payload JSON structure
+- Include task_id, repo_url, branch
+- Map agent_ids from Terraform output `agent_ids_map`
+- The `agent_ids` must match the structure from Terraform output
+
+**Display payload preview:**
+
+```
+✅ Payload created
+   📄 Payload size: <size> bytes
+   🔍 Preview: <truncated-json-preview>
+```
+
+**Proceed to Phase 6.**
+
+### Phase 6: Workflow Trigger 🚀
+
+**Display this prompt with confirmation:**
+
+```
+🚀 Phase 6: Workflow Trigger
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+I'll invoke the orchestrator Lambda function to start workflow generation.
+
+⚠️  This will:
+  • Trigger asynchronous workflow generation
+  • Process takes 5-15 minutes
+  • Create a GitHub PR with generated workflows
+
+🎯 Final step - trigger workflow generation? (yes/no)
+```
+
+**After user confirmation:**
+
+- Use AWS CLI: `aws lambda invoke`
+- Function name: from `terraform output -raw lambda_orchestrator`
+- Invocation type: `Event` (asynchronous)
+- CLI binary format: `raw-in-base64-out`
+- Payload: JSON string of the payload created above
+
+**Display invocation result:**
+
+```
+✅ Workflow generation triggered successfully!
+   🆔 Task ID: <task-id>
+   📍 Repository: <repo-url>
+   🌿 Branch: <branch>
+   ⏱️  Estimated completion: 5-15 minutes
+```
+
+**If invocation fails:**
+
+```
+❌ Lambda invocation failed: <error-message>
+   Would you like to retry? (yes/no)
+```
+
+**Proceed to Phase 7 if monitoring is requested.**
+
+### Phase 7: Progress Monitoring 📊 (Optional)
+
+**Display this prompt with confirmation:**
+
+```
+📊 Phase 7: Progress Monitoring
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+I can monitor the workflow generation progress in real-time by:
+  • Polling DynamoDB every 5 seconds
+  • Displaying step-by-step progress
+  • Showing completion status
+
+📋 Expected workflow steps:
+  1️⃣  repo_ingestor
+  2️⃣  repo_scanner
+  3️⃣  static_analyzer
+  4️⃣  pipeline_designer
+  5️⃣  security_compliance
+  6️⃣  yaml_generator_ci_attempt_1
+  7️⃣  yaml_generator_cd_attempt_1
+  8️⃣  pr_manager
+  9️⃣  github_operations
+
+🔍 Monitor progress? (yes/no)
+```
+
+**After user confirmation (if requested):**
+
+- Poll DynamoDB table for task status
+- Table name: from `terraform output -raw dynamodb_table`
+- Key: `{"task_id": {"S": "<task_id>"}}`
+- Check `status` field: "in_progress", "completed", or "failed"
+- Check `result` field for step-by-step progress
+- Display progress with colors and icons:
+  - ✅ Green for completed steps
+  - 🔄 Yellow for in-progress steps
+  - ❌ Red for failed steps
+  - ⏳ Gray for pending steps
+
+**Display progress updates:**
+
+```
+📊 Workflow Generation Progress
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ repo_ingestor          [Completed]
+🔄 repo_scanner           [In Progress...]
+⏳ static_analyzer        [Pending]
+⏳ pipeline_designer      [Pending]
+...
+```
+
+**When complete:**
+
+```
+🎉 Workflow generation completed successfully!
+   🔗 Check the GitHub PR for generated workflows.
+```
+
+### Required Steps (Technical Details):
+
+**Note**: The phases above contain the interactive prompts. The technical implementation details are below.
+
+## Implementation Guidelines
+
+### 🎨 Color and Icon Guidelines
+
+**Always use these formatting conventions:**
+
+- **Success**: ✅ Green checkmark
+- **Error**: ❌ Red X
+- **Warning**: ⚠️ Yellow warning sign
+- **Info**: ℹ️ Blue info icon
+- **Progress**: 🔄 Yellow circular arrows
+- **Pending**: ⏳ Hourglass
+- **Phase headers**: Use box-drawing characters (━, ┃, ═, ║)
+- **Emojis for phases**: 🔍 📦 🏗️ 🎫 📝 🚀 📊
+
+**Color codes for terminal output:**
+
+- Green: `\033[32m` or use ✅ emoji
+- Red: `\033[31m` or use ❌ emoji
+- Yellow: `\033[33m` or use ⚠️ emoji
+- Blue: `\033[34m` or use ℹ️ emoji
+- Reset: `\033[0m`
+
+### Preferred Method: Python Script
+
+Use the Python helper script for easier execution:
+
+```bash
+python3 scripts/trigger_workflow_generation.py <repo_url> [--branch <branch>] [--monitor]
+```
+
+Or import and use programmatically:
+
+```python
+from scripts.trigger_workflow_generation import trigger_workflow_generation
+result = trigger_workflow_generation("https://github.com/owner/repo", branch="main", monitor=True)
+```
+
+**Note**: When using the Python script, still display the welcome message and phase confirmations as described above.
+
+### Alternative Method: Direct AWS CLI
+
+If Python script is not available, use AWS CLI directly after getting Terraform outputs. **Still follow the interactive phase-by-phase confirmation process.**
+
+### Prerequisites Check
+
+Before triggering workflow generation, verify:
+
+- AWS CLI is installed and configured
+- AWS credentials are valid (check with `aws sts get-caller-identity`)
+- Terraform is installed
+- Terraform outputs are available (`terraform output -json`)
+- boto3 Python library (if using Python script: `pip install boto3`)
+
+### Error Handling
+
+- If Terraform outputs are missing, inform user to run `terraform apply` first
+- If AWS credentials are invalid, prompt user to configure them
+- If Lambda invocation fails, show the error message
+- If task fails, extract error from DynamoDB result field
+
+### Task ID Generation
+
+```bash
+# Preferred method
+TASK_ID="workflow-gen-$(date +%s)-$(openssl rand -hex 4)"
+
+# Fallback if openssl not available
+TASK_ID="workflow-gen-$(date +%s)-$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+```
+
+### Lambda Invocation Command
+
+```bash
+aws lambda invoke \
+  --function-name "$LAMBDA_ORCHESTRATOR" \
+  --invocation-type Event \
+  --cli-binary-format raw-in-base64-out \
+  --payload "$PAYLOAD" \
+  /tmp/orchestrator_response_${TASK_ID}.json
+```
+
+### DynamoDB Query for Status
+
+```bash
+aws dynamodb get-item \
+  --table-name "$TABLE_NAME" \
+  --key "{\"task_id\": {\"S\": \"$TASK_ID\"}}" \
+  --output json
+```
+
+### Progress Monitoring
+
+- Parse `result` field (JSON string) from DynamoDB item
+- Extract `steps` array from result
+- Each step has: `step` (name) and `result` (object with `status`)
+- Status values: "success", "error", or "in_progress"
+
+## Example User Prompts and Responses
+
+### Example 1: Simple Request
+
+**User:** "Generate workflow for https://github.com/user/repo"
+
+**AI Response Flow:**
+
+1. **Display welcome message** (with colorful box and icons)
+2. **Ask for confirmation** to start
+3. **User confirms:** "yes"
+4. **Phase 1:** Display prerequisites check prompt → User confirms → Perform checks → Show results
+5. **Phase 2:** Display repository validation prompt → User confirms → Validate → Show results
+6. **Phase 3:** Display infrastructure setup prompt → User confirms → Get Terraform outputs → Show results
+7. **Phase 4:** Display task initialization prompt → User confirms → Generate task ID → Show results
+8. **Phase 5:** Display payload creation prompt → User confirms → Create payload → Show preview
+9. **Phase 6:** Display workflow trigger prompt → User confirms → Invoke Lambda → Show success message:
+   ```
+   ✅ Workflow generation triggered successfully!
+      🆔 Task ID: workflow-gen-1234567890-abc123
+      📍 Repository: https://github.com/user/repo
+      🌿 Branch: main
+      ⏱️  Estimated completion: 5-15 minutes
+   ```
+10. **Phase 7:** Ask if user wants to monitor → User says "no" → End with task ID for manual tracking
+
+### Example 2: With Branch
+
+**User:** "Create CI/CD pipeline for https://github.com/owner/repo on branch develop"
+
+**AI Response Flow:**
+
+1. **Display welcome message**
+2. **Ask for confirmation** to start
+3. **User confirms:** "yes"
+4. Follow same phases as Example 1, but:
+   - In Phase 2, extract branch "develop" from request
+   - Display: `📍 Branch: develop` (instead of "main")
+   - Use branch "develop" in payload
+
+### Example 3: With Monitoring
+
+**User:** "Trigger workflow generation for https://github.com/user/repo and monitor progress"
+
+**AI Response Flow:**
+
+1. **Display welcome message**
+2. **Ask for confirmation** to start
+3. **User confirms:** "yes"
+4. Follow phases 1-6 as in Example 1
+5. **Phase 7:** Display monitoring prompt → User confirms → Poll DynamoDB → Display real-time progress:
+   ```
+   📊 Workflow Generation Progress
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   ✅ repo_ingestor          [Completed]
+   ✅ repo_scanner           [Completed]
+   🔄 static_analyzer        [In Progress...]
+   ⏳ pipeline_designer      [Pending]
+   ⏳ security_compliance    [Pending]
+   ...
+   ```
+6. Continue polling until completion, then show:
+   ```
+   🎉 Workflow generation completed successfully!
+      🔗 Check the GitHub PR for generated workflows.
+   ```
+
+### Implementation Steps for AI Assistant
+
+When user requests workflow generation:
+
+1. **Display Welcome Message:**
+
+   - Show the colorful welcome box with process overview
+   - Include all icons and formatting
+   - Wait for user confirmation before proceeding
+
+2. **Parse the request:**
+
+   - Extract repository URL (required)
+   - Extract branch name (optional, default: "main")
+   - Check if monitoring is requested
+
+3. **Execute Phase-by-Phase with Confirmations:**
+
+   - **Phase 1:** Display prerequisites check prompt → Wait for confirmation → Perform checks → Show results
+   - **Phase 2:** Display repository validation prompt → Wait for confirmation → Validate → Show results
+   - **Phase 3:** Display infrastructure setup prompt → Wait for confirmation → Get Terraform outputs → Show results
+   - **Phase 4:** Display task initialization prompt → Wait for confirmation → Generate task ID → Show results
+   - **Phase 5:** Display payload creation prompt → Wait for confirmation → Create payload → Show preview
+   - **Phase 6:** Display workflow trigger prompt → Wait for confirmation → Invoke Lambda → Show success
+   - **Phase 7:** Display monitoring prompt → Wait for confirmation (if requested) → Monitor progress
+
+4. **Execute using Python script (preferred):**
+
+   ```python
+   import subprocess
+   cmd = ["python3", "scripts/trigger_workflow_generation.py", repo_url]
+   if branch != "main":
+       cmd.extend(["--branch", branch])
+   if monitor:
+       cmd.append("--monitor")
+   subprocess.run(cmd)
+   ```
+
+   **Note**: Even when using the script, display interactive prompts and wait for confirmations.
+
+5. **Or execute using AWS CLI:**
+
+   - Follow the same phase-by-phase confirmation process
+   - Get Terraform outputs
+   - Generate task ID
+   - Create payload JSON
+   - Invoke Lambda function
+   - Optionally poll DynamoDB
+
+6. **Display results with formatting:**
+   - Use colorful icons and formatting
+   - Show task ID prominently
+   - Display repository and branch information
+   - Confirm Lambda invocation status
+   - Provide instructions for tracking progress
+
+## Response Format
+
+**CRITICAL**: All responses must follow this format:
+
+1. **Welcome Message** (always first):
+
+   - Colorful box with icons
+   - Process overview
+   - Wait for confirmation
+
+2. **Each Phase**:
+
+   - Display phase header with icon and box-drawing characters
+   - Show what will happen in this phase
+   - Ask for confirmation
+   - Wait for user response
+   - Perform the action
+   - Display results with appropriate icons (✅ ❌ ⚠️)
+
+3. **Final Summary** (after Phase 6):
+
+   - ✅ Confirm task ID generated
+   - 📍 Show repository and branch being processed
+   - ✅ Confirm Lambda invocation was successful
+   - 🆔 Provide task ID for tracking
+   - 📊 Optionally offer to monitor progress (Phase 7)
+   - ⏱️ Inform user that process takes 5-15 minutes
+
+4. **Progress Monitoring** (if Phase 7 confirmed):
+   - Display real-time progress with status icons
+   - Update every 5 seconds
+   - Show completion message when done
+
+## Agent IDs Mapping
+
+The orchestrator expects these agent IDs in the payload:
+
+- `repo_scanner`: Repository Scanner Agent
+- `pipeline_designer`: Pipeline Designer Agent
+- `security_compliance`: Security & Compliance Agent
+- `yaml_generator`: YAML Generator Agent
+- `pr_manager`: PR Manager Agent
+
+Note: The Terraform output `agent_ids_map` includes a `feedback` agent, but the orchestrator only uses the 5 agents listed above.
+
+## DynamoDB Table Structure
+
+Task record structure:
+
+- Primary key: `task_id` (String)
+- Attributes:
+  - `status` (String): "in_progress", "completed", "failed"
+  - `repo_url` (String): Repository URL
+  - `result` (String): JSON string with workflow steps and results
+  - `created_at` (String): ISO timestamp
+  - `updated_at` (String): ISO timestamp
+
+## Notes
+
+- The orchestrator Lambda runs asynchronously (Event invocation type)
+- Workflow generation typically takes 5-15 minutes
+- The orchestrator coordinates multiple agents and Lambda functions
+- Final result includes a GitHub pull request with generated workflow files
+- All artifacts are stored in S3 bucket (from Terraform output `s3_bucket`)
+
+## 🎯 Key Requirements Summary
+
+**MANDATORY Interactive Flow:**
+
+1. ✅ **Always start with welcome message** - Colorful box with icons and process overview
+2. ✅ **Wait for confirmation** - Never proceed without user explicitly confirming each phase
+3. ✅ **Use colorful formatting** - Icons (✅ ❌ ⚠️ 🔄 ⏳) and box-drawing characters for headers
+4. ✅ **Phase-by-phase confirmations** - Each of the 7 phases requires explicit user confirmation
+5. ✅ **Display results with icons** - Use appropriate icons for success, error, warning, progress
+6. ✅ **Never skip confirmations** - Even if using Python script, still show interactive prompts
+
+**Color and Icon Usage:**
+
+- ✅ Green checkmark for success
+- ❌ Red X for errors
+- ⚠️ Yellow warning for warnings
+- 🔄 Yellow circular arrows for in-progress
+- ⏳ Hourglass for pending
+- Phase-specific emojis: 🔍 📦 🏗️ 🎫 📝 🚀 📊
+
+**User Experience:**
+
+- Make the process feel interactive and guided
+- Provide clear information at each step
+- Give users control with confirmations
+- Show progress and status clearly
+- Use visual formatting to make information easy to scan
