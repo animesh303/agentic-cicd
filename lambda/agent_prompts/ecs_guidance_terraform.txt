@@ -1,0 +1,141 @@
+CRITICAL: ECS resources are defined in Terraform. Infrastructure MUST be deployed BEFORE deploy job.
+
+JOB SEQUENCING REQUIREMENTS:
+- Create an "infrastructure" job that runs BEFORE the "deploy" job
+- The infrastructure job must:
+  1. Setup Terraform CLI (hashicorp/setup-terraform@v3 with cli_config_credentials_token) BEFORE any terraform commands
+  2. Configure AWS credentials via OIDC
+  3. Run terraform init, plan, and apply to create ECS resources
+  4. Output ECS_CLUSTER and ECS_SERVICE as job outputs
+- The deploy job must:
+  1. Depend on infrastructure job completion (use needs: [infrastructure])
+  2. Get ECS values from infrastructure job outputs (with fallback to GitHub variables)
+  3. ALWAYS validate and set ECS values as environment variables in a separate step BEFORE using them (consistent with ECR pattern)
+  4. Use these validated environment variables in ECS deployment commands
+
+ECS VALUE EXTRACTION (CRITICAL - USE DISCOVERED OUTPUT NAMES FROM CODEBASE ANALYSIS):
+- CRITICAL: The codebase analysis has already discovered the actual Terraform output names from the .tf files
+- Available ECS outputs found in codebase: {available_ecs_outputs}
+- ACTUAL output names to use (discovered from codebase):
+  - ECS Cluster output: {ecs_cluster_output}
+  - ECS Service output: {ecs_service_output}
+- CRITICAL: Terraform output commands fail for these common reasons:
+  1. Terraform apply failed or was skipped (check step outcome)
+  2. Output names don't match what's defined in terraform code - USE THE DISCOVERED NAMES ABOVE
+  3. Outputs don't exist in terraform state (outputs not defined in .tf files)
+  4. Terraform state is not initialized or corrupted
+  5. Working directory is incorrect
+- BEFORE getting outputs, you MUST:
+  1. Verify terraform apply succeeded (check step outcome)
+  2. Use the ACTUAL output names discovered from codebase analysis (listed above)
+  3. DO NOT hardcode or guess output names - use the discovered names from analysis
+  
+CRITICAL: If the discovered output names are empty, it means:
+  - ECS outputs were not found in the terraform codebase
+  - You should use GitHub variables/secrets as fallback
+  - List available outputs with `terraform output` for debugging
+
+CORRECT PATTERN (MUST USE - USE DISCOVERED OUTPUT NAMES):
+  - name: Get ECS Details
+    id: ecs-details
+    working-directory: {terraform_working_dir}
+    run: |
+      # First, verify terraform apply succeeded
+      if [ "${{{{ steps.terraform-apply.outcome }}}}" != "success" ]; then
+        echo "Error: Terraform apply did not succeed. Cannot get outputs."
+        echo "Terraform apply outcome: ${{{{ steps.terraform-apply.outcome }}}}"
+        exit 1
+      fi
+      
+      # CRITICAL: Use the ACTUAL output names discovered from codebase analysis
+      # Output names discovered from terraform codebase analysis:
+      # - Cluster output: {ecs_cluster_output}
+      # - Service output: {ecs_service_output}
+      # Available outputs found: {available_ecs_outputs}
+      
+      # Get cluster output using discovered name
+      if [[ -n "{ecs_cluster_output}" ]]; then
+        echo "Using discovered cluster output name: {ecs_cluster_output}"
+        CLUSTER=$(terraform output -raw {ecs_cluster_output} 2>&1)
+        if [[ "$CLUSTER" == *"Error"* ]] || [[ "$CLUSTER" == *"No outputs"* ]] || [[ -z "$CLUSTER" ]]; then
+          echo "Error: Failed to get {ecs_cluster_output} output"
+          echo "Output value: $CLUSTER"
+          echo "Available outputs:"
+          terraform output
+          echo "Using GitHub variable as fallback"
+          CLUSTER="${{{{ vars.ECS_CLUSTER }}}}"
+        fi
+      else
+        echo "Warning: No cluster output name discovered from codebase analysis"
+        echo "Available outputs found in analysis: {available_ecs_outputs}"
+        echo "Listing actual terraform outputs:"
+        terraform output
+        echo "Using GitHub variable as fallback"
+        CLUSTER="${{{{ vars.ECS_CLUSTER }}}}"
+      fi
+      
+      # Get service output using discovered name
+      if [[ -n "{ecs_service_output}" ]]; then
+        echo "Using discovered service output name: {ecs_service_output}"
+        SERVICE=$(terraform output -raw {ecs_service_output} 2>&1)
+        if [[ "$SERVICE" == *"Error"* ]] || [[ "$SERVICE" == *"No outputs"* ]] || [[ -z "$SERVICE" ]]; then
+          echo "Error: Failed to get {ecs_service_output} output"
+          echo "Output value: $SERVICE"
+          echo "Available outputs:"
+          terraform output
+          echo "Using GitHub variable as fallback"
+          SERVICE="${{{{ vars.ECS_SERVICE }}}}"
+        fi
+      else
+        echo "Warning: No service output name discovered from codebase analysis"
+        echo "Available outputs found in analysis: {available_ecs_outputs}"
+        echo "Listing actual terraform outputs:"
+        terraform output
+        echo "Using GitHub variable as fallback"
+        SERVICE="${{{{ vars.ECS_SERVICE }}}}"
+      fi
+      
+      # Validate values before setting outputs
+      if [[ -z "$CLUSTER" ]] || [[ "$CLUSTER" == *"Error"* ]]; then
+        echo "Error: ECS_CLUSTER is invalid or empty"
+        exit 1
+      fi
+      if [[ -z "$SERVICE" ]] || [[ "$SERVICE" == *"Error"* ]]; then
+        echo "Error: ECS_SERVICE is invalid or empty"
+        exit 1
+      fi
+      
+      echo "cluster=$CLUSTER" >> $GITHUB_OUTPUT
+      echo "service=$SERVICE" >> $GITHUB_OUTPUT
+      echo "Successfully extracted ECS values using discovered outputs: {ecs_cluster_output}, {ecs_service_output}"
+  - Add to infrastructure job outputs section:
+    outputs:
+      ecs_cluster: ${{ steps.ecs-details.outputs.cluster }}
+      ecs_service: ${{ steps.ecs-details.outputs.service }}
+- In deploy job, ALWAYS validate and set ECS values as environment variables in a separate step (consistent with ECR pattern):
+  - name: Set ECS Values
+    run: |
+      ECS_CLUSTER="${{ needs.infrastructure.outputs.ecs_cluster || vars.ECS_CLUSTER }}"
+      ECS_SERVICE="${{ needs.infrastructure.outputs.ecs_service || vars.ECS_SERVICE }}"
+      if [[ -z "$ECS_CLUSTER" ]] || [[ "$ECS_CLUSTER" == *"Error"* ]]; then
+        echo "Error: ECS_CLUSTER is not set or invalid"
+        echo "Infrastructure job output: ${{ needs.infrastructure.outputs.ecs_cluster }}"
+        exit 1
+      fi
+      if [[ -z "$ECS_SERVICE" ]] || [[ "$ECS_SERVICE" == *"Error"* ]]; then
+        echo "Error: ECS_SERVICE is not set or invalid"
+        echo "Infrastructure job output: ${{ needs.infrastructure.outputs.ecs_service }}"
+        exit 1
+      fi
+      echo "ECS_CLUSTER=$ECS_CLUSTER" >> $GITHUB_ENV
+      echo "ECS_SERVICE=$ECS_SERVICE" >> $GITHUB_ENV
+      echo "Successfully set ECS values: cluster=$ECS_CLUSTER, service=$ECS_SERVICE"
+  - name: Update ECS Service
+    run: |
+      # ECS values are now available as environment variables from previous step
+      aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --force-new-deployment
+
+- DO NOT use secrets.ECS_CLUSTER or secrets.ECS_SERVICE if ECS is managed by Terraform.
+- CRITICAL: Every job that uses aws-actions/configure-aws-credentials@v4 MUST have `permissions: id-token: write` or OIDC will fail.
+- CRITICAL: All terraform commands MUST use `working-directory: {terraform_working_dir}` to run in the correct directory.
+

@@ -189,7 +189,71 @@ TERRAFORM SETUP REQUIREMENTS:
 - Setup step must come before terraform init, plan, or apply
 - CRITICAL: All terraform commands (init, plan, apply, output) MUST run in the correct working directory
 - Use `working-directory: {terraform_working_dir}` in each terraform step, OR use `cd {terraform_working_dir} && terraform ...` format
-- Example CORRECT format:
+
+CRITICAL: TERRAFORM OUTPUT ROOT CAUSE ANALYSIS AND PREVENTION:
+- Terraform output commands fail for these COMMON REASONS:
+  1. **Terraform apply failed or was skipped** - Most common cause! Check if terraform apply step succeeded
+  2. **Output names don't match** - Output name in workflow doesn't match terraform code (e.g., "ecr_registry" vs "ecr_registry_url")
+  3. **Outputs not defined** - Outputs don't exist in terraform .tf files
+  4. **Terraform state issues** - State not initialized, corrupted, or locked
+  5. **Wrong working directory** - Running terraform output in wrong directory
+
+PREVENTION (MUST DO BEFORE GETTING OUTPUTS):
+- ALWAYS verify terraform apply succeeded: Check step outcome with `steps.terraform-apply.outcome == 'success'`
+- ALWAYS use output names discovered from codebase analysis: The static analyzer has already extracted actual output names from .tf files
+- NEVER hardcode output names: Output names vary by codebase (e.g., "ecs_cluster" vs "ecs_cluster_name", "ecr_repository_url" vs separate "ecr_registry" and "ecr_repository")
+- The codebase analysis provides the actual output names - use those exact names in your workflow
+- ALWAYS check terraform state is initialized: Ensure terraform init ran successfully
+
+CRITICAL: USE DISCOVERED OUTPUT NAMES FROM CODEBASE ANALYSIS:
+- The static analyzer has already analyzed the terraform codebase and discovered the actual output names
+- Use the output names provided in the guidance sections (ecr_guidance, ecs_guidance)
+- These names are extracted directly from the terraform .tf files, so they are guaranteed to match
+- DO NOT try to discover names at runtime - use the names from codebase analysis
+- If discovered names are empty, it means outputs weren't found in the codebase - use GitHub variables as fallback
+
+ERROR HANDLING:
+- If terraform output fails, environment variables will contain error messages like "::error::Terraform exited with code 1."
+- This causes docker build and other commands to fail with cryptic errors
+- ALWAYS include error handling when extracting terraform outputs:
+  - Verify terraform apply succeeded BEFORE trying to get outputs
+  - List available outputs for debugging
+  - Capture stderr with `2>&1` to see actual error messages
+  - Check if output contains "Error" or is empty
+  - Provide fallback to GitHub variables if terraform output fails
+  - Validate values before using them
+
+Example CORRECT format using discovered output names from codebase analysis:
+  - name: Get ECR Details
+    id: ecr-details
+    working-directory: {terraform_working_dir}
+    run: |
+      # Use output names discovered from codebase analysis (provided in ecr_guidance section)
+      # Example: If analysis found "ecr_repository_url", use that exact name
+      REPO_URL=$(terraform output -raw ecr_repository_url 2>&1)
+      if [[ "$REPO_URL" == *"Error"* ]] || [[ -z "$REPO_URL" ]]; then
+        echo "Warning: Failed to get ecr_repository_url, using GitHub variables"
+        REGISTRY="${{{{ vars.ECR_REGISTRY }}}}"
+        REPOSITORY="${{{{ vars.ECR_REPOSITORY }}}}"
+      else
+        # Parse repository URL
+        REGISTRY=$(echo "$REPO_URL" | sed 's|/.*||')
+        REPOSITORY=$(echo "$REPO_URL" | sed 's|.*/||')
+      fi
+      echo "registry=$REGISTRY" >> $GITHUB_OUTPUT
+      echo "repository=$REPOSITORY" >> $GITHUB_OUTPUT
+- Example INCORRECT format (DO NOT USE - hardcodes output names without using discovered names):
+  - name: Get ECR Details
+    id: ecr-details
+    working-directory: {terraform_working_dir}
+    run: |
+      # ❌ WRONG: Hardcodes output names without checking what was discovered from codebase analysis
+      echo "registry=$(terraform output -raw ecr_registry)" >> $GITHUB_OUTPUT
+      echo "repository=$(terraform output -raw ecr_repository)" >> $GITHUB_OUTPUT
+  # This will fail if outputs are named differently (e.g., "ecr_repository_url" instead)
+  # ✅ CORRECT: Use the output names provided in the ecr_guidance section from codebase analysis
+
+Example CORRECT terraform workflow (with root cause prevention):
   - name: Setup Terraform
     uses: hashicorp/setup-terraform@v3
     with:
@@ -201,11 +265,38 @@ TERRAFORM SETUP REQUIREMENTS:
     working-directory: {terraform_working_dir}
     run: terraform plan
   - name: Terraform Apply
+    id: terraform-apply
     working-directory: {terraform_working_dir}
     run: terraform apply -auto-approve
-  - name: Get Terraform Outputs
+  - name: Verify Apply Succeeded
     working-directory: {terraform_working_dir}
-    run: terraform output -json > terraform_outputs.json
+    run: |
+      if [ "${{{{ steps.terraform-apply.outcome }}}}" != "success" ]; then
+        echo "Error: Terraform apply failed. Cannot proceed."
+        exit 1
+      fi
+  - name: List Outputs (Debug)
+    working-directory: {terraform_working_dir}
+    continue-on-error: true
+    run: terraform output
+  - name: Get Terraform Outputs
+    id: terraform-outputs
+    working-directory: {terraform_working_dir}
+    run: |
+      # Verify apply succeeded
+      if [ "${{{{ steps.terraform-apply.outcome }}}}" != "success" ]; then
+        echo "Error: Cannot get outputs - terraform apply failed"
+        exit 1
+      fi
+      # Use output name discovered from codebase analysis (provided in ecr_guidance section)
+      # Example: If analysis found "ecr_repository_url", use that exact name
+      REGISTRY=$(terraform output -raw ecr_repository_url 2>&1)
+      if [[ "$REGISTRY" == *"Error"* ]] || [[ -z "$REGISTRY" ]]; then
+        echo "Error: Failed to get discovered output name"
+        terraform output
+        exit 1
+      fi
+      echo "registry=$REGISTRY" >> $GITHUB_OUTPUT
 
 CRITICAL: AWS CLI COMMAND FORMATTING:
 - ALL AWS CLI commands MUST be written on a SINGLE LINE
@@ -224,6 +315,23 @@ CRITICAL: AWS CLI COMMAND FORMATTING:
       --service ${{ env.ECS_SERVICE }}
 - This rule applies to ALL AWS CLI commands: aws ecs, aws ecr, aws sts, aws s3, etc.
 - Other commands (terraform, docker, etc.) can use multi-line format if needed, but AWS CLI must always be single-line
+
+CRITICAL: DOCKER BUILD ERROR PREVENTION:
+- Before running docker build/push, ALWAYS validate that ECR_REGISTRY and ECR_REPOSITORY are set correctly
+- If these environment variables contain error messages (like "::error::Terraform exited with code 1."), docker commands will fail
+- Add validation step before docker build:
+  - name: Validate ECR Values
+    run: |
+      if [[ -z "$ECR_REGISTRY" ]] || [[ "$ECR_REGISTRY" == *"Error"* ]] || [[ "$ECR_REGISTRY" == *"error"* ]]; then
+        echo "Error: ECR_REGISTRY is invalid: $ECR_REGISTRY"
+        exit 1
+      fi
+      if [[ -z "$ECR_REPOSITORY" ]] || [[ "$ECR_REPOSITORY" == *"Error"* ]] || [[ "$ECR_REPOSITORY" == *"error"* ]]; then
+        echo "Error: ECR_REPOSITORY is invalid: $ECR_REPOSITORY"
+        exit 1
+      fi
+      echo "ECR_REGISTRY=$ECR_REGISTRY"
+      echo "ECR_REPOSITORY=$ECR_REPOSITORY"
 
 ECR Configuration Handling:
 {ecr_guidance}

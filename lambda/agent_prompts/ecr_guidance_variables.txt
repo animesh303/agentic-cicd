@@ -1,0 +1,10 @@
+- If ECR_REGISTRY and ECR_REPOSITORY are pre-configured as GitHub variables, use:
+  - ECR_REGISTRY: ${{{{ vars.ECR_REGISTRY }}}}
+  - ECR_REPOSITORY: ${{{{ vars.ECR_REPOSITORY }}}}
+
+- If ECR resources are created by Terraform:
+  - Infrastructure job MUST run before container build job
+  - Setup Terraform CLI (with cli_config_credentials_token) BEFORE any terraform commands
+  - Deploy infrastructure first, then extract ECR values from outputs
+  - Container job must depend on infrastructure job (needs: [infrastructure])
+

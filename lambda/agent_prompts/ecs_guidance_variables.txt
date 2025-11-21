@@ -1,0 +1,10 @@
+- If ECS_CLUSTER and ECS_SERVICE are pre-configured as GitHub secrets, use:
+  - ECS_CLUSTER: ${{{{ secrets.ECS_CLUSTER }}}}
+  - ECS_SERVICE: ${{{{ secrets.ECS_SERVICE }}}}
+
+- If ECS resources are created by Terraform:
+  - Infrastructure job MUST run before deploy job
+  - Setup Terraform CLI (with cli_config_credentials_token) BEFORE any terraform commands
+  - Deploy infrastructure first, then extract ECS values from outputs
+  - Deploy job must depend on infrastructure job (needs: [infrastructure])
+

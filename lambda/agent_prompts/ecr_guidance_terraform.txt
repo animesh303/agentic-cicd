@@ -1,0 +1,257 @@
+CRITICAL: ECR resources are defined in Terraform. Infrastructure MUST be deployed BEFORE container build.
+
+JOB SEQUENCING REQUIREMENTS:
+- Create an "infrastructure" job that runs BEFORE the "container" job
+- The infrastructure job must:
+  1. Setup Terraform CLI (hashicorp/setup-terraform@v3 with cli_config_credentials_token) BEFORE any terraform commands
+  2. Configure AWS credentials via OIDC
+  3. Run terraform init, plan, and apply to create ECR resources
+  4. Output ECR_REGISTRY and ECR_REPOSITORY as job outputs or environment variables
+- The container job must:
+  1. Depend on infrastructure job completion (use needs: [infrastructure])
+  2. Get ECR values from infrastructure job outputs or run terraform output
+  3. Use these values in Docker build/push steps
+
+TERRAFORM SETUP ORDER (MUST BE FIRST):
+- Setup Terraform CLI with cli_config_credentials_token BEFORE terraform init
+- CRITICAL: All terraform commands MUST run in the correct working directory: {terraform_working_dir}
+- CRITICAL: Terraform apply MUST succeed before attempting to get outputs - if apply fails, outputs won't exist
+- ALWAYS check terraform apply exit code and verify it succeeded before running terraform output commands
+
+CORRECT PATTERN (MUST USE):
+  - name: Setup Terraform
+    uses: hashicorp/setup-terraform@v3
+    with:
+      cli_config_credentials_token: ${{{{ secrets.TF_API_TOKEN }}}}
+  - name: Terraform Init
+    working-directory: {terraform_working_dir}
+    run: terraform init
+  - name: Terraform Plan
+    working-directory: {terraform_working_dir}
+    run: terraform plan
+  - name: Terraform Apply
+    id: terraform-apply
+    working-directory: {terraform_working_dir}
+    run: terraform apply -auto-approve
+  - name: Verify Terraform Apply Succeeded
+    working-directory: {terraform_working_dir}
+    run: |
+      if [ "${{{{ steps.terraform-apply.outcome }}}}" != "success" ]; then
+        echo "Error: Terraform apply failed or was skipped. Cannot get outputs."
+        echo "Available outputs:"
+        terraform output || echo "No outputs available"
+        exit 1
+      fi
+  - name: List Available Terraform Outputs (for debugging)
+    working-directory: {terraform_working_dir}
+    continue-on-error: true
+    run: terraform output
+
+ECR VALUE EXTRACTION (CRITICAL - USE DISCOVERED OUTPUT NAMES FROM CODEBASE ANALYSIS):
+- CRITICAL: The codebase analysis has already discovered the actual Terraform output names from the .tf files
+- Available ECR outputs found in codebase: {available_ecr_outputs}
+- ACTUAL output names to use (discovered from codebase):
+  - ECR Repository URL output: {ecr_repository_url_output}
+  - ECR Registry output: {ecr_registry_output}
+  - ECR Repository output: {ecr_repository_output}
+- CRITICAL: Terraform output commands fail for these common reasons:
+  1. Terraform apply failed or was skipped (check step outcome)
+  2. Output names don't match what's defined in terraform code - USE THE DISCOVERED NAMES ABOVE
+  3. Outputs don't exist in terraform state (outputs not defined in .tf files)
+  4. Terraform state is not initialized or corrupted
+  5. Working directory is incorrect
+- BEFORE getting outputs, you MUST:
+  1. Verify terraform apply succeeded (check step outcome)
+  2. Use the ACTUAL output names discovered from codebase analysis (listed above)
+  3. Handle two patterns based on what was discovered:
+     a. If {ecr_repository_url_output} exists: Single output containing full URL (parse to extract registry and repository)
+     b. If {ecr_registry_output} and {ecr_repository_output} exist: Separate outputs for registry and repository
+  4. DO NOT hardcode or guess output names - use the discovered names from analysis
+  
+CRITICAL: If the discovered output names are empty, it means:
+  - ECR outputs were not found in the terraform codebase
+  - You should use GitHub variables as fallback
+  - List available outputs with `terraform output` for debugging
+
+CORRECT PATTERN (MUST USE - USE DISCOVERED OUTPUT NAMES):
+  - name: Get ECR Details
+    id: ecr-details
+    working-directory: {terraform_working_dir}
+    run: |
+      # First, verify terraform apply succeeded
+      if [ "${{{{ steps.terraform-apply.outcome }}}}" != "success" ]; then
+        echo "Error: Terraform apply did not succeed. Cannot get outputs."
+        echo "Terraform apply outcome: ${{{{ steps.terraform-apply.outcome }}}}"
+        exit 1
+      fi
+      
+      # CRITICAL: Use the ACTUAL output names discovered from codebase analysis
+      # Output names discovered from terraform codebase analysis:
+      # - Repository URL output: {ecr_repository_url_output}
+      # - Registry output: {ecr_registry_output}
+      # - Repository output: {ecr_repository_output}
+      # Available outputs found: {available_ecr_outputs}
+      
+      # Check if we have a single repository_url output (most common pattern)
+      if [[ -n "{ecr_repository_url_output}" ]]; then
+        # Single repository_url output - parse it to extract registry and repository
+        echo "Using discovered repository URL output: {ecr_repository_url_output}"
+        REPO_URL=$(terraform output -raw {ecr_repository_url_output} 2>&1)
+        
+        if [[ "$REPO_URL" == *"Error"* ]] || [[ "$REPO_URL" == *"No outputs"* ]] || [[ -z "$REPO_URL" ]]; then
+          echo "Error: Failed to get {ecr_repository_url_output} output"
+          echo "Output value: $REPO_URL"
+          echo "Available outputs:"
+          terraform output
+          echo "Using GitHub variables as fallback"
+          REGISTRY="${{{{ vars.ECR_REGISTRY }}}}"
+          REPOSITORY="${{{{ vars.ECR_REPOSITORY }}}}"
+        else
+          # Parse repository URL: ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/REPOSITORY_NAME
+          if [[ "$REPO_URL" == *".dkr.ecr."* ]]; then
+            REGISTRY=$(echo "$REPO_URL" | sed 's|/.*||')
+            REPOSITORY=$(echo "$REPO_URL" | sed 's|.*/||')
+            echo "Parsed from {ecr_repository_url_output}: registry=$REGISTRY, repository=$REPOSITORY"
+          else
+            echo "Error: Unexpected format for {ecr_repository_url_output}: $REPO_URL"
+            echo "Using GitHub variables as fallback"
+            REGISTRY="${{{{ vars.ECR_REGISTRY }}}}"
+            REPOSITORY="${{{{ vars.ECR_REPOSITORY }}}}"
+          fi
+        fi
+      elif [[ -n "{ecr_registry_output}" ]] && [[ -n "{ecr_repository_output}" ]]; then
+        # Separate registry and repository outputs
+        echo "Using discovered separate outputs: registry={ecr_registry_output}, repository={ecr_repository_output}"
+        
+        REGISTRY=$(terraform output -raw {ecr_registry_output} 2>&1)
+        if [[ "$REGISTRY" == *"Error"* ]] || [[ "$REGISTRY" == *"No outputs"* ]] || [[ -z "$REGISTRY" ]]; then
+          echo "Error: Failed to get {ecr_registry_output} output"
+          echo "Output value: $REGISTRY"
+          echo "Available outputs:"
+          terraform output
+          echo "Using GitHub variable as fallback"
+          REGISTRY="${{{{ vars.ECR_REGISTRY }}}}"
+        fi
+        
+        REPOSITORY=$(terraform output -raw {ecr_repository_output} 2>&1)
+        if [[ "$REPOSITORY" == *"Error"* ]] || [[ "$REPOSITORY" == *"No outputs"* ]] || [[ -z "$REPOSITORY" ]]; then
+          echo "Error: Failed to get {ecr_repository_output} output"
+          echo "Output value: $REPOSITORY"
+          echo "Available outputs:"
+          terraform output
+          echo "Using GitHub variable as fallback"
+          REPOSITORY="${{{{ vars.ECR_REPOSITORY }}}}"
+        fi
+      else
+        # No outputs discovered from codebase analysis
+        echo "Warning: No ECR output names discovered from codebase analysis"
+        echo "Available outputs found in analysis: {available_ecr_outputs}"
+        echo "Listing actual terraform outputs:"
+        terraform output
+        echo "Using GitHub variables as fallback"
+        REGISTRY="${{{{ vars.ECR_REGISTRY }}}}"
+        REPOSITORY="${{{{ vars.ECR_REPOSITORY }}}}"
+      fi
+      
+      # Validate values before setting outputs
+      if [[ -z "$REGISTRY" ]] || [[ "$REGISTRY" == *"Error"* ]]; then
+        echo "Error: ECR_REGISTRY is invalid or empty"
+        exit 1
+      fi
+      if [[ -z "$REPOSITORY" ]] || [[ "$REPOSITORY" == *"Error"* ]]; then
+        echo "Error: ECR_REPOSITORY is invalid or empty"
+        exit 1
+      fi
+      
+      echo "registry=$REGISTRY" >> $GITHUB_OUTPUT
+      echo "repository=$REPOSITORY" >> $GITHUB_OUTPUT
+      echo "Successfully extracted ECR values using discovered outputs"
+
+ALTERNATIVE PATTERN (if you prefer to fail the job if terraform outputs are missing):
+  - name: Get ECR Details
+    id: ecr-details
+    working-directory: {terraform_working_dir}
+    run: |
+      # Use discovered output names from codebase analysis
+      if [[ -n "{ecr_repository_url_output}" ]]; then
+        REPO_URL=$(terraform output -raw {ecr_repository_url_output} 2>&1)
+        if [[ "$REPO_URL" == *"Error"* ]]; then
+          echo "Error: Failed to get {ecr_repository_url_output}"
+          exit 1
+        fi
+        REGISTRY=$(echo "$REPO_URL" | sed 's|/.*||')
+        REPOSITORY=$(echo "$REPO_URL" | sed 's|.*/||')
+      elif [[ -n "{ecr_registry_output}" ]] && [[ -n "{ecr_repository_output}" ]]; then
+        REGISTRY=$(terraform output -raw {ecr_registry_output} 2>&1)
+        REPOSITORY=$(terraform output -raw {ecr_repository_output} 2>&1)
+        if [[ "$REGISTRY" == *"Error"* ]] || [[ "$REPOSITORY" == *"Error"* ]]; then
+          echo "Error: Failed to get Terraform outputs"
+          exit 1
+        fi
+      else
+        echo "Error: No ECR outputs discovered from codebase analysis"
+        terraform output
+        exit 1
+      fi
+      echo "registry=$REGISTRY" >> $GITHUB_OUTPUT
+      echo "repository=$REPOSITORY" >> $GITHUB_OUTPUT
+
+IN CONTAINER BUILD JOB:
+- Always validate that ECR values are set before using them in docker commands
+- Use job outputs from infrastructure job: `ECR_REGISTRY: ${{{{ needs.infrastructure.outputs.ecr_registry }}}}`
+- If infrastructure job outputs are not available, use GitHub variables as fallback:
+  - name: Set ECR Values
+    run: |
+      ECR_REGISTRY="${{{{ needs.infrastructure.outputs.ecr_registry || vars.ECR_REGISTRY }}}}"
+      ECR_REPOSITORY="${{{{ needs.infrastructure.outputs.ecr_repository || vars.ECR_REPOSITORY }}}}"
+      if [[ -z "$ECR_REGISTRY" ]] || [[ -z "$ECR_REPOSITORY" ]]; then
+        echo "Error: ECR_REGISTRY or ECR_REPOSITORY is empty"
+        exit 1
+      fi
+      echo "ECR_REGISTRY=$ECR_REGISTRY" >> $GITHUB_ENV
+      echo "ECR_REPOSITORY=$ECR_REPOSITORY" >> $GITHUB_ENV
+
+CRITICAL: DO NOT use terraform output commands directly in environment variables without error handling. Always check for errors and provide fallback values.
+
+WORKFLOW STRUCTURE:
+jobs:
+  sast:
+    runs-on: ubuntu-latest
+    # Runs in parallel with other quality jobs
+  sca:
+    runs-on: ubuntu-latest
+    # Runs in parallel with other quality jobs
+  secrets-scan:
+    runs-on: ubuntu-latest
+    # Runs in parallel with other quality jobs
+  iac-scan:
+    runs-on: ubuntu-latest
+    # Runs in parallel with other quality jobs
+  infrastructure:
+    runs-on: ubuntu-latest
+    needs: [sast, sca, secrets-scan, iac-scan]  # Waits for all quality jobs
+    permissions:
+      id-token: write  # REQUIRED for OIDC authentication
+      contents: read   # Required for checkout
+    steps:
+      - Setup Terraform CLI (with cli_config_credentials_token)
+      - Configure AWS credentials
+      - terraform init (with working-directory: {terraform_working_dir})
+      - terraform plan (with working-directory: {terraform_working_dir})
+      - terraform apply (with working-directory: {terraform_working_dir})
+      - Get ECR outputs and set as job outputs (with working-directory: {terraform_working_dir})
+  
+  container:
+    runs-on: ubuntu-latest
+    needs: [infrastructure]  # CRITICAL: Must wait for infrastructure
+    permissions:
+      id-token: write  # REQUIRED for OIDC authentication
+      contents: read   # Required for checkout
+    steps:
+      - Get ECR values from infrastructure job or terraform output
+      - Build and push Docker image
+
+- DO NOT use vars.ECR_REGISTRY or vars.ECR_REPOSITORY if ECR is managed by Terraform.
+- CRITICAL: Every job that uses aws-actions/configure-aws-credentials@v4 MUST have `permissions: id-token: write` or OIDC will fail.
+- CRITICAL: All terraform commands MUST use `working-directory: {terraform_working_dir}` to run in the correct directory.
+

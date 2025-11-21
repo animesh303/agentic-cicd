@@ -632,152 +632,69 @@ def lambda_handler(event, context):
                 ecr_resources = terraform_analysis.get("ecr_resources", [])
                 ecr_outputs = terraform_analysis.get("ecr_outputs", [])
                 
-                ecr_guidance = f"""CRITICAL: ECR resources are defined in Terraform. Infrastructure MUST be deployed BEFORE container build.
-
-JOB SEQUENCING REQUIREMENTS:
-- Create an "infrastructure" job that runs BEFORE the "container" job
-- The infrastructure job must:
-  1. Setup Terraform CLI (hashicorp/setup-terraform@v3 with cli_config_credentials_token) BEFORE any terraform commands
-  2. Configure AWS credentials via OIDC
-  3. Run terraform init, plan, and apply to create ECR resources
-  4. Output ECR_REGISTRY and ECR_REPOSITORY as job outputs or environment variables
-- The container job must:
-  1. Depend on infrastructure job completion (use needs: [infrastructure])
-  2. Get ECR values from infrastructure job outputs or run terraform output
-  3. Use these values in Docker build/push steps
-
-TERRAFORM SETUP ORDER (MUST BE FIRST):
-- Setup Terraform CLI with cli_config_credentials_token BEFORE terraform init
-- CRITICAL: All terraform commands MUST run in the correct working directory: {terraform_working_dir}
-- Example:
-  - name: Setup Terraform
-    uses: hashicorp/setup-terraform@v3
-    with:
-      cli_config_credentials_token: ${{{{ secrets.TF_API_TOKEN }}}}
-  - name: Terraform Init
-    working-directory: {terraform_working_dir}
-    run: terraform init
-  - name: Terraform Plan
-    working-directory: {terraform_working_dir}
-    run: terraform plan
-  - name: Terraform Apply
-    working-directory: {terraform_working_dir}
-    run: terraform apply -auto-approve
-
-ECR VALUE EXTRACTION:
-- If Terraform outputs exist for ECR, use them:
-  - Add step: `terraform output -json` in the working directory: {terraform_working_dir}
-  - Extract: `ECR_REGISTRY=$(jq -r '.ecr_registry.value' terraform_outputs.json)`
-  - Extract: `ECR_REPOSITORY=$(jq -r '.ecr_repository.value' terraform_outputs.json)`
-- If Terraform outputs don't exist for ECR registry:
-  - Use GitHub variable: `ECR_REGISTRY: ${{{{ vars.ECR_REGISTRY }}}}`
-  - Extract repository name from Terraform outputs or use GitHub variable: `ECR_REPOSITORY: ${{{{ vars.ECR_REPOSITORY }}}}`
-  - DO NOT construct the registry URL from ACCOUNT_ID - always use GitHub variables if Terraform outputs are not available
-
-WORKFLOW STRUCTURE:
-jobs:
-  sast:
-    runs-on: ubuntu-latest
-    # Runs in parallel with other quality jobs
-  sca:
-    runs-on: ubuntu-latest
-    # Runs in parallel with other quality jobs
-  secrets-scan:
-    runs-on: ubuntu-latest
-    # Runs in parallel with other quality jobs
-  iac-scan:
-    runs-on: ubuntu-latest
-    # Runs in parallel with other quality jobs
-  infrastructure:
-    runs-on: ubuntu-latest
-    needs: [sast, sca, secrets-scan, iac-scan]  # Waits for all quality jobs
-    permissions:
-      id-token: write  # REQUIRED for OIDC authentication
-      contents: read   # Required for checkout
-    steps:
-      - Setup Terraform CLI (with cli_config_credentials_token)
-      - Configure AWS credentials
-      - terraform init (with working-directory: {terraform_working_dir})
-      - terraform plan (with working-directory: {terraform_working_dir})
-      - terraform apply (with working-directory: {terraform_working_dir})
-      - Get ECR outputs and set as job outputs (with working-directory: {terraform_working_dir})
-  
-  container:
-    runs-on: ubuntu-latest
-    needs: [infrastructure]  # CRITICAL: Must wait for infrastructure
-    permissions:
-      id-token: write  # REQUIRED for OIDC authentication
-      contents: read   # Required for checkout
-    steps:
-      - Get ECR values from infrastructure job or terraform output
-      - Build and push Docker image
-
-- DO NOT use vars.ECR_REGISTRY or vars.ECR_REPOSITORY if ECR is managed by Terraform.
-- CRITICAL: Every job that uses aws-actions/configure-aws-credentials@v4 MUST have `permissions: id-token: write` or OIDC will fail.
-- CRITICAL: All terraform commands MUST use `working-directory: {terraform_working_dir}` to run in the correct directory."""
+                # Extract actual output names discovered from codebase analysis
+                ecr_output_names = [out.get("output_name", "") for out in ecr_outputs if out.get("output_name")]
+                
+                # Find specific output names
+                ecr_repository_url_output = next(
+                    (out.get("output_name") for out in ecr_outputs 
+                     if "repository_url" in out.get("output_name", "").lower() or 
+                        "repo_url" in out.get("output_name", "").lower()), 
+                    None
+                )
+                ecr_registry_output = next(
+                    (out.get("output_name") for out in ecr_outputs 
+                     if "registry" in out.get("output_name", "").lower() and 
+                        "url" not in out.get("output_name", "").lower()), 
+                    None
+                )
+                ecr_repository_output = next(
+                    (out.get("output_name") for out in ecr_outputs 
+                     if "repository" in out.get("output_name", "").lower() and 
+                        "url" not in out.get("output_name", "").lower()), 
+                    None
+                )
+                
+                ecr_guidance = format_prompt(
+                    "ecr_guidance_terraform",
+                    terraform_working_dir=terraform_working_dir,
+                    available_ecr_outputs=", ".join(ecr_output_names) if ecr_output_names else "none found",
+                    ecr_repository_url_output=ecr_repository_url_output or "",
+                    ecr_registry_output=ecr_registry_output or "",
+                    ecr_repository_output=ecr_repository_output or "",
+                )
             else:
-                ecr_guidance = """- If ECR_REGISTRY and ECR_REPOSITORY are pre-configured as GitHub variables, use:
-  - ECR_REGISTRY: ${{{{ vars.ECR_REGISTRY }}}}
-  - ECR_REPOSITORY: ${{{{ vars.ECR_REPOSITORY }}}}
-
-- If ECR resources are created by Terraform:
-  - Infrastructure job MUST run before container build job
-  - Setup Terraform CLI (with cli_config_credentials_token) BEFORE any terraform commands
-  - Deploy infrastructure first, then extract ECR values from outputs
-  - Container job must depend on infrastructure job (needs: [infrastructure])"""
+                ecr_guidance = format_prompt("ecr_guidance_variables")
             
             # Build ECS guidance
             if terraform_analysis and terraform_analysis.get("has_ecs"):
                 ecs_resources = terraform_analysis.get("ecs_resources", [])
                 ecs_outputs = terraform_analysis.get("ecs_outputs", [])
                 
-                ecs_guidance = f"""CRITICAL: ECS resources are defined in Terraform. Infrastructure MUST be deployed BEFORE deploy job.
-
-JOB SEQUENCING REQUIREMENTS:
-- Create an "infrastructure" job that runs BEFORE the "deploy" job
-- The infrastructure job must:
-  1. Setup Terraform CLI (hashicorp/setup-terraform@v3 with cli_config_credentials_token) BEFORE any terraform commands
-  2. Configure AWS credentials via OIDC
-  3. Run terraform init, plan, and apply to create ECS resources
-  4. Output ECS_CLUSTER and ECS_SERVICE as job outputs
-- The deploy job must:
-  1. Depend on infrastructure job completion (use needs: [infrastructure])
-  2. Get ECS values from infrastructure job outputs or run terraform output
-  3. Use these values in ECS deployment commands
-
-ECS VALUE EXTRACTION:
-- If Terraform outputs exist for ECS, use them:
-  - Add step in infrastructure job to extract ECS outputs (MUST use working-directory: {terraform_working_dir}):
-    - name: Get ECS Details
-      id: ecs-details
-      working-directory: {terraform_working_dir}
-      run: |
-        echo "cluster=$(terraform output -raw ecs_cluster)" >> $GITHUB_OUTPUT
-        echo "service=$(terraform output -raw ecs_service)" >> $GITHUB_OUTPUT
-  - Add to infrastructure job outputs section:
-    outputs:
-      ecs_cluster: ${{ steps.ecs-details.outputs.cluster }}
-      ecs_service: ${{ steps.ecs-details.outputs.service }}
-- In deploy job, use infrastructure job outputs:
-  - name: Update ECS Service
-    env:
-      ECS_CLUSTER: ${{ needs.infrastructure.outputs.ecs_cluster }}
-      ECS_SERVICE: ${{ needs.infrastructure.outputs.ecs_service }}
-    run: aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE }} --force-new-deployment
-
-- DO NOT use secrets.ECS_CLUSTER or secrets.ECS_SERVICE if ECS is managed by Terraform.
-- CRITICAL: Every job that uses aws-actions/configure-aws-credentials@v4 MUST have `permissions: id-token: write` or OIDC will fail.
-- CRITICAL: All terraform commands MUST use `working-directory: {terraform_working_dir}` to run in the correct directory."""
+                # Extract actual output names discovered from codebase analysis
+                ecs_output_names = [out.get("output_name", "") for out in ecs_outputs if out.get("output_name")]
+                
+                # Find specific output names
+                ecs_cluster_output = next(
+                    (out.get("output_name") for out in ecs_outputs 
+                     if "cluster" in out.get("output_name", "").lower()), 
+                    None
+                )
+                ecs_service_output = next(
+                    (out.get("output_name") for out in ecs_outputs 
+                     if "service" in out.get("output_name", "").lower()), 
+                    None
+                )
+                
+                ecs_guidance = format_prompt(
+                    "ecs_guidance_terraform",
+                    terraform_working_dir=terraform_working_dir,
+                    available_ecs_outputs=", ".join(ecs_output_names) if ecs_output_names else "none found",
+                    ecs_cluster_output=ecs_cluster_output or "",
+                    ecs_service_output=ecs_service_output or "",
+                )
             else:
-                ecs_guidance = """- If ECS_CLUSTER and ECS_SERVICE are pre-configured as GitHub secrets, use:
-  - ECS_CLUSTER: ${{{{ secrets.ECS_CLUSTER }}}}
-  - ECS_SERVICE: ${{{{ secrets.ECS_SERVICE }}}}
-
-- If ECS resources are created by Terraform:
-  - Infrastructure job MUST run before deploy job
-  - Setup Terraform CLI (with cli_config_credentials_token) BEFORE any terraform commands
-  - Deploy infrastructure first, then extract ECS values from outputs
-  - Deploy job must depend on infrastructure job (needs: [infrastructure])"""
+                ecs_guidance = format_prompt("ecs_guidance_variables")
             
             base_prompt = format_prompt(
                 "yaml_generator_base",
