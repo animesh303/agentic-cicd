@@ -13,17 +13,83 @@ CRITICAL: TERRAFORM WORKING DIRECTORY:
 - If terraform_working_dir is ".", Terraform files are in the repository root
 - If terraform_working_dir is a subdirectory (e.g., "infrastructure"), you MUST specify the working-directory in ALL terraform steps
 
-WORKFLOW TRIGGERS (CRITICAL):
-- The workflow MUST trigger ONLY when a pull request is closed (merged) to the main branch
+WORKFLOW ARCHITECTURE (CRITICAL):
+- You MUST generate TWO SEPARATE workflow files: one for CI (Continuous Integration) and one for CD (Continuous Deployment)
+- CI Workflow: Contains security scanning, testing, and validation jobs - runs when PR is opened
+- CD Workflow: Contains infrastructure deployment, container build, and application deployment - runs when PR is closed/merged
+- Both workflows must be complete and functional independently
+
+CI WORKFLOW TRIGGERS (CRITICAL):
+- The CI workflow MUST trigger when a pull request is OPENED to the main branch
+- Use ONLY the `pull_request` trigger with `types: [opened]` and `branches: [main]`
+- Example CORRECT format for CI workflow:
+  name: CI Pipeline
+  on:
+    pull_request:
+      branches:
+        - main
+      types:
+        - opened
+- This ensures CI runs when PRs are opened, allowing early feedback on code quality and security
+
+CD WORKFLOW TRIGGERS (CRITICAL):
+- The CD workflow MUST trigger when a pull request is CLOSED (merged) to the main branch
 - Use ONLY the `pull_request` trigger with `types: [closed]` and `branches: [main]`
-- Example CORRECT format:
+- Example CORRECT format for CD workflow:
+  name: CD Pipeline
   on:
     pull_request:
       branches:
         - main
       types:
         - closed
-- This ensures the workflow runs only when PRs are merged (closed) to main, not on PR open/update
+- Add a condition to only run when PR is merged: `if: github.event.pull_request.merged == true` in the deploy job
+- This ensures CD runs only when PRs are merged (closed) to main, deploying the application
+
+WORKFLOW SEPARATION RULES:
+- CI Workflow (.github/workflows/ci.yml) should contain:
+  - Security scanning jobs (sast, sca, secrets-scan, iac-scan) - all run in parallel
+  - Testing jobs (if applicable)
+  - Code quality checks (if applicable)
+  - NO infrastructure deployment, NO container builds, NO application deployment
+  
+- CD Workflow (.github/workflows/cd.yml) should contain:
+  - Infrastructure deployment job (Terraform init/plan/apply)
+  - Container build and push job (Docker build/push to ECR)
+  - Application deployment job (ECS update-service or similar)
+  - NO security scanning jobs (those are in CI)
+
+OUTPUT FORMAT:
+- You MUST generate BOTH workflows in your response
+- Format: Two separate YAML code blocks, clearly labeled
+- First code block: CI workflow (name: CI Pipeline, trigger: pull_request opened)
+- Second code block: CD workflow (name: CD Pipeline, trigger: pull_request closed)
+- Example format:
+  ```yaml
+  # CI Workflow
+  name: CI Pipeline
+  on:
+    pull_request:
+      branches:
+        - main
+      types:
+        - opened
+  jobs:
+    # CI jobs here
+  ```
+  
+  ```yaml
+  # CD Workflow
+  name: CD Pipeline
+  on:
+    pull_request:
+      branches:
+        - main
+      types:
+        - closed
+  jobs:
+    # CD jobs here
+  ```
 
 Requirements:
 - Use aws-actions/configure-aws-credentials@v4 for AWS authentication via OIDC (OpenID Connect)

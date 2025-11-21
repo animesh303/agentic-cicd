@@ -1,0 +1,125 @@
+Generate ONLY the CI (Continuous Integration) workflow YAML based on this pipeline design: {pipeline_design}.
+
+REPOSITORY STRUCTURE CONTEXT:
+{repo_structure}
+
+WORKFLOW TRIGGERS (CRITICAL):
+- The CI workflow MUST trigger when a pull request is OPENED or REOPENED to the main branch
+- Use the `pull_request` trigger with `types: [opened, reopened]` and `branches: [main]`
+- `opened` triggers when PR is first created
+- `reopened` triggers when a closed PR is reopened
+- Example CORRECT format:
+  name: CI Pipeline
+  on:
+    pull_request:
+      types:
+        - opened
+        - reopened
+- This ensures CI runs when PRs are opened or reopened, allowing early feedback on code quality and security
+
+CI WORKFLOW CONTENT (MANDATORY):
+- This workflow should contain ONLY security scanning and validation jobs
+- Include these parallel jobs:
+  1. SAST Job (Static Application Security Testing) - Use Semgrep
+  2. SCA Job (Software Composition Analysis) - Use Trivy filesystem scanner
+  3. Secrets Scanning Job - Use Trivy secrets scanner
+  4. IaC Security Scanning Job - Use Trivy config scanner AND Checkov
+- All security scanning jobs MUST run in PARALLEL (no `needs:` dependencies between them)
+- Each job MUST include `continue-on-error: true` OR append `|| true` to commands
+- DO NOT include infrastructure deployment, container builds, or application deployment (those are in CD workflow)
+
+Requirements:
+- Use aws-actions/configure-aws-credentials@v4 for AWS authentication via OIDC (OpenID Connect) if needed
+- Configure AWS credentials using role-to-assume: ${{{{ secrets.AWS_ROLE_TO_ASSUME }}}} and aws-region: ${{{{ vars.AWS_REGION }}}}
+- DO NOT use AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY - use OIDC authentication only
+- Reference secrets via secrets.* and variables via vars.*
+- CRITICAL: Every job MUST have meaningful actions - jobs cannot be empty or incomplete
+- All jobs require `permissions: contents: read` for checkout
+
+QUALITY AND SECURITY SCANNING REQUIREMENTS (MANDATORY - PARALLEL JOBS):
+All quality and security scans must be split into SEPARATE PARALLEL JOBS that run simultaneously.
+
+1. SAST Job (Static Application Security Testing) - Use Semgrep:
+   - Job name: `sast` or `sast-scan`
+   - Tool: Semgrep
+   - Example job structure:
+     sast:
+       runs-on: ubuntu-latest
+       permissions:
+         contents: read
+       steps:
+         - uses: actions/checkout@v3
+         - name: Install Semgrep
+           run: pip install semgrep
+         - name: Run Semgrep SAST
+           continue-on-error: true
+           run: semgrep --config auto . || true
+
+2. SCA Job (Software Composition Analysis) - Use Trivy:
+   - Job name: `sca` or `sca-scan`
+   - Tool: Trivy filesystem scanner
+   - Example job structure:
+     sca:
+       runs-on: ubuntu-latest
+       permissions:
+         contents: read
+       steps:
+         - uses: actions/checkout@v3
+         - name: Install Trivy
+           run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.47.0
+         - name: Trivy SCA (Filesystem)
+           continue-on-error: true
+           run: trivy fs --scanners vuln . || true
+
+3. Secrets Scanning Job - Use Trivy:
+   - Job name: `secrets-scan` or `secrets`
+   - Tool: Trivy secrets scanner
+   - Example job structure:
+     secrets-scan:
+       runs-on: ubuntu-latest
+       permissions:
+         contents: read
+       steps:
+         - uses: actions/checkout@v3
+         - name: Install Trivy
+           run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.47.0
+         - name: Trivy Secrets Scan
+           continue-on-error: true
+           run: trivy fs --scanners secret . || true
+
+4. IaC Security Scanning Job - Use Trivy AND Checkov:
+   - Job name: `iac-scan` or `iac-security`
+   - Tools: Trivy config scanner AND Checkov
+   - Example job structure:
+     iac-scan:
+       runs-on: ubuntu-latest
+       permissions:
+         contents: read
+       steps:
+         - uses: actions/checkout@v3
+         - name: Install Trivy
+           run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v0.47.0
+         - name: Install Checkov
+           run: pip install checkov
+         - name: Trivy IaC Scan
+           continue-on-error: true
+           run: trivy config . || true
+         - name: Run Checkov
+           continue-on-error: true
+           run: checkov -d . || true
+
+CRITICAL REQUIREMENTS:
+- All quality/security jobs MUST run in PARALLEL (no `needs:` dependencies between them)
+- Each job MUST include `continue-on-error: true` OR append `|| true` to commands
+- Security scans are informational and should never block the pipeline
+- All jobs require `permissions: contents: read` for checkout
+
+CRITICAL: WORKFLOW COMPLETENESS REQUIREMENTS:
+- You MUST generate the COMPLETE CI workflow from start to finish
+- The workflow MUST include ALL security scanning jobs with ALL their steps
+- Ensure every job is fully defined with all required fields and steps
+- The YAML code block MUST be complete - do not stop mid-line or mid-block
+- End the YAML code block with ``` only after the complete workflow is written
+
+Return ONLY the CI workflow inside a ```yaml code fence. Do not include any other prose before or after the YAML block. The YAML MUST be complete and not truncated.
+

@@ -1,0 +1,222 @@
+Generate ONLY the CD (Continuous Deployment) workflow YAML based on this pipeline design: {pipeline_design}.
+
+REPOSITORY STRUCTURE CONTEXT:
+{repo_structure}
+
+CRITICAL: TERRAFORM WORKING DIRECTORY:
+- Terraform files are located in: {terraform_working_dir}
+- When running terraform commands (init, plan, apply), you MUST change to this directory first using `working-directory: {terraform_working_dir}` or `cd {terraform_working_dir}`
+- Example CORRECT format:
+  - name: Terraform Init
+    working-directory: {terraform_working_dir}
+    run: terraform init
+- If terraform_working_dir is ".", Terraform files are in the repository root
+- If terraform_working_dir is a subdirectory (e.g., "infrastructure"), you MUST specify the working-directory in ALL terraform steps
+
+WORKFLOW TRIGGERS (CRITICAL):
+- The CD workflow MUST trigger when a pull request is CLOSED (merged) to the main branch
+- Use ONLY the `pull_request` trigger with `types: [closed]` and `branches: [main]`
+- Add a condition to only run when PR is merged: `if: github.event.pull_request.merged == true` in deployment jobs
+- Example CORRECT format:
+  name: CD Pipeline
+  on:
+    pull_request:
+      branches:
+        - main
+      types:
+        - closed
+- This ensures CD runs only when PRs are merged (closed) to main, deploying the application
+
+CD WORKFLOW CONTENT (MANDATORY):
+- This workflow should contain ONLY deployment-related jobs:
+  1. Infrastructure deployment job (Terraform init/plan/apply)
+  2. Container build and push job (Docker build/push to ECR)
+  3. Application deployment job (ECS update-service or similar)
+- DO NOT include security scanning jobs (those are in CI workflow)
+
+Requirements:
+- Use aws-actions/configure-aws-credentials@v4 for AWS authentication via OIDC (OpenID Connect)
+- Configure AWS credentials using role-to-assume: ${{{{ secrets.AWS_ROLE_TO_ASSUME }}}} and aws-region: ${{{{ vars.AWS_REGION }}}}
+- DO NOT use AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY - use OIDC authentication only
+- Reference secrets via secrets.* and variables via vars.*
+- CRITICAL: Every job MUST have meaningful actions - jobs cannot be empty or incomplete
+- Deploy jobs MUST include actual deployment commands (e.g., aws ecs update-service, kubectl apply, etc.)
+- A job with only credential configuration and no actual work is INCOMPLETE and will be rejected
+
+CRITICAL: NPM SETUP (IF NPM IS USED):
+- IF npm commands MUST be included for some reason, you MUST NOT include the `cache` parameter at all
+- NEVER use `cache: 'npm'` - it requires a lock file (package-lock.json) and will cause workflow failures with "Dependencies lock file is not found"
+- DO NOT include any cache parameter when using actions/setup-node@v6
+- ALL npm commands MUST include `|| true` to prevent workflow failures - this ensures the workflow continues even if npm commands fail
+- Example CORRECT format (if npm setup is required):
+  - uses: actions/setup-node@v6
+    with:
+      node-version: 24
+      # DO NOT include cache parameter
+  - name: Install dependencies
+    run: npm ci || true
+  - name: Run lint
+    run: npm run lint || true
+- Example INCORRECT format (DO NOT USE):
+  - uses: actions/setup-node@v6
+    with:
+      node-version: 24
+      cache: 'npm'  # ❌ WRONG - will fail if lock file doesn't exist
+  - run: npm ci  # ❌ WRONG - will fail the workflow if npm ci fails
+- Simply omit the cache parameter entirely - do not set it to any value
+- ALWAYS append `|| true` to ALL npm commands (npm ci, npm install, npm run, npm test, etc.) to ensure workflow continues even on failure
+- If you need to install dependencies before building a Docker image, use npm commands with `|| true` but DO NOT use cache
+
+CRITICAL: OIDC PERMISSIONS REQUIREMENT (MUST INCLUDE):
+- When using aws-actions/configure-aws-credentials@v4 with OIDC, you MUST set permissions at the job level
+- The `id-token: write` permission is REQUIRED for OIDC authentication - without it, the workflow will fail with "Could not load credentials"
+- The `contents: read` permission is typically required for checkout and other operations
+- Example CORRECT format (add permissions to EVERY job that uses AWS credentials):
+  jobs:
+    my-job:
+      runs-on: ubuntu-latest
+      permissions:
+        id-token: write  # REQUIRED for OIDC
+        contents: read    # Required for checkout and file operations
+      steps:
+        - uses: actions/checkout@v3
+        - name: Configure AWS Credentials
+          uses: aws-actions/configure-aws-credentials@v4
+          with:
+            role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+            aws-region: ${{ vars.AWS_REGION }}
+- EVERY job that uses aws-actions/configure-aws-credentials@v4 MUST have these permissions
+
+CRITICAL JOB SEQUENCING RULES:
+- Infrastructure job should run FIRST (no dependencies)
+- Container build job should depend on infrastructure job when ECR is in Terraform: `needs: [infrastructure]`
+- Application deployment job MUST depend on BOTH infrastructure AND build jobs: `needs: [infrastructure, build]`
+- CRITICAL: In GitHub Actions, you can ONLY access outputs from jobs listed in the `needs` array
+- If a job accesses `needs.job_name.outputs`, that job MUST be included in the `needs` list
+- Example CORRECT sequencing:
+  jobs:
+    infrastructure:
+      runs-on: ubuntu-latest
+      outputs:
+        ecr_registry: ${{ steps.ecr-details.outputs.registry }}
+        ecs_cluster: ${{ steps.ecs-details.outputs.cluster }}
+        ecs_service: ${{ steps.ecs-details.outputs.service }}
+      # No needs: - runs first
+    build:
+      needs: [infrastructure]  # Waits for infrastructure
+      runs-on: ubuntu-latest
+      # Can access: needs.infrastructure.outputs.*
+    deploy:
+      needs: [infrastructure, build]  # CRITICAL: Must include BOTH if accessing infrastructure outputs
+      runs-on: ubuntu-latest
+      steps:
+        - name: Set ECS Values
+          run: |
+            # Can access needs.infrastructure.outputs because infrastructure is in needs list
+            ECS_CLUSTER="${{ needs.infrastructure.outputs.ecs_cluster }}"
+            ECS_SERVICE="${{ needs.infrastructure.outputs.ecs_service }}"
+- Example INCORRECT (DO NOT USE):
+  deploy:
+    needs: [build]  # ❌ WRONG - cannot access needs.infrastructure.outputs
+    steps:
+      - run: |
+          ECS_CLUSTER="${{ needs.infrastructure.outputs.ecs_cluster }}"  # ❌ ERROR: infrastructure not in needs
+- VALIDATION CHECKLIST:
+  - [ ] If deploy job uses `needs.infrastructure.outputs.*`, then `needs: [infrastructure, build]` (not just `[build]`)
+  - [ ] If deploy job uses `needs.build.outputs.*`, then `needs: [infrastructure, build]` (not just `[infrastructure]`)
+  - [ ] All jobs that access outputs from other jobs have those jobs in their `needs` list
+
+TERRAFORM SETUP REQUIREMENTS:
+- ALWAYS setup Terraform CLI (hashicorp/setup-terraform@v3) BEFORE any terraform commands
+- Use cli_config_credentials_token: ${{{{ secrets.TF_API_TOKEN }}}} if Terraform Cloud/Enterprise is used
+- Setup step must come before terraform init, plan, or apply
+- CRITICAL: All terraform commands (init, plan, apply, output) MUST run in the correct working directory
+- Use `working-directory: {terraform_working_dir}` in each terraform step, OR use `cd {terraform_working_dir} && terraform ...` format
+
+ECR Configuration Handling:
+{ecr_guidance}
+
+ECS Configuration Handling:
+{ecs_guidance}
+
+CRITICAL: AWS CLI COMMAND FORMATTING:
+- ALL AWS CLI commands MUST be written on a SINGLE LINE
+- DO NOT split AWS CLI commands across multiple lines
+- Use single-line format even if the command is long
+- Example CORRECT format:
+  run: aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE }} --force-new-deployment
+- Example CORRECT format (with YAML literal block for multiple commands):
+  run: |
+    aws ecs update-service --cluster ${{ env.ECS_CLUSTER }} --service ${{ env.ECS_SERVICE }} --force-new-deployment
+    aws ecs wait services-stable --cluster ${{ env.ECS_CLUSTER }} --services ${{ env.ECS_SERVICE }}
+- This rule applies to ALL AWS CLI commands: aws ecs, aws ecr, aws sts, aws s3, etc.
+
+CRITICAL: DEPLOY JOB DEPENDENCIES AND OUTPUTS:
+- The deploy job MUST include ALL jobs in its `needs` list that it accesses outputs from
+- If deploy job uses `needs.infrastructure.outputs.*`, then `needs: [infrastructure, build]` (NOT just `[build]`)
+- If deploy job uses `needs.build.outputs.*`, then `needs: [infrastructure, build]` (NOT just `[infrastructure]`)
+- GitHub Actions RULE: You can ONLY access outputs from jobs listed in the `needs` array
+- VALIDATION CHECKLIST before generating deploy job:
+  - [ ] List all jobs whose outputs are accessed in the deploy job
+  - [ ] Include ALL those jobs in the `needs` list
+  - [ ] If accessing infrastructure outputs (ECS cluster, service, ECR registry), include `infrastructure` in needs
+  - [ ] If accessing build outputs, include `build` in needs
+  - [ ] Most common case: `needs: [infrastructure, build]` when accessing both infrastructure and build outputs
+
+CRITICAL: DEPLOY JOB COMPLETENESS:
+- The deploy job MUST include actual deployment actions - it cannot be empty or incomplete
+- A deploy job with only AWS credentials configuration is INCOMPLETE and will do nothing
+- You MUST include:
+  1. AWS credentials configuration (if needed for deployment)
+  2. Steps to set/validate deployment values (ECS cluster, service, etc.)
+  3. The actual deployment command (e.g., aws ecs update-service, kubectl apply, etc.)
+- Example of INCOMPLETE deploy job (DO NOT GENERATE THIS):
+  deploy:
+    needs: [build]  # ❌ WRONG - missing infrastructure but accessing its outputs
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+      - name: Set ECS Values
+        run: |
+          ECS_CLUSTER="${{ needs.infrastructure.outputs.ecs_cluster }}"  # ❌ ERROR: infrastructure not in needs
+  # ❌ This will fail because infrastructure is not in needs list
+- Example of CORRECT deploy job:
+  deploy:
+    needs: [infrastructure, build]  # ✅ CORRECT - includes both jobs
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Set ECS Values
+        run: |
+          # ✅ Can access infrastructure outputs because infrastructure is in needs list
+          ECS_CLUSTER="${{ needs.infrastructure.outputs.ecs_cluster }}"
+          ECS_SERVICE="${{ needs.infrastructure.outputs.ecs_service }}"
+          if [[ -z "$ECS_CLUSTER" ]] || [[ -z "$ECS_SERVICE" ]]; then
+            echo "Error: ECS values not set"
+            exit 1
+          fi
+          echo "ECS_CLUSTER=$ECS_CLUSTER" >> $GITHUB_ENV
+          echo "ECS_SERVICE=$ECS_SERVICE" >> $GITHUB_ENV
+      - name: Deploy Application
+        run: |
+          # Actual deployment command
+          aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVICE --force-new-deployment
+
+CRITICAL: WORKFLOW COMPLETENESS REQUIREMENTS:
+- You MUST generate the COMPLETE CD workflow from start to finish
+- The workflow MUST include ALL jobs with ALL their steps - completeness is more important than verbosity
+- Do NOT truncate or cut off the workflow mid-generation - if you must choose, prioritize completeness over detailed comments
+- Ensure every job is fully defined with all required fields and steps
+- The YAML code block MUST be complete - do not stop mid-line or mid-block
+- End the YAML code block with ``` only after the complete workflow is written
+- CRITICAL: A complete but concise workflow is better than an incomplete verbose one
+
+Return ONLY the CD workflow inside a ```yaml code fence. Do not include any other prose before or after the YAML block. The YAML MUST be complete and not truncated.
+

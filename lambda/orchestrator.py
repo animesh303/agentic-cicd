@@ -305,6 +305,85 @@ def extract_yaml_content(text):
     return "\n".join(yaml_lines).strip()
 
 
+def extract_multiple_yaml_workflows(text):
+    """
+    Extract multiple YAML workflows from agent output.
+    Returns a dict with 'ci' and 'cd' keys, each containing YAML content.
+    """
+    if not text:
+        return {"ci": "", "cd": ""}
+    
+    workflows = {"ci": "", "cd": ""}
+    
+    # Find all YAML code blocks
+    yaml_blocks = re.findall(
+        r"```(?:yaml)?\s*\n(.*?)\n```", text, re.DOTALL | re.IGNORECASE
+    )
+    
+    if not yaml_blocks:
+        # Fallback: try to find single block or extract from text
+        single_yaml = extract_yaml_content(text)
+        if single_yaml:
+            # Try to determine if it's CI or CD based on triggers
+            if "types:\n        - opened" in single_yaml or 'types: [opened]' in single_yaml:
+                workflows["ci"] = single_yaml
+            elif "types:\n        - closed" in single_yaml or 'types: [closed]' in single_yaml:
+                workflows["cd"] = single_yaml
+            else:
+                # Default: assume it's a combined workflow, split it
+                # For now, assign to CD as fallback
+                workflows["cd"] = single_yaml
+        return workflows
+    
+    # Process each YAML block
+    for yaml_content in yaml_blocks:
+        yaml_content = yaml_content.strip()
+        if not yaml_content:
+            continue
+        
+        # Determine if this is CI or CD workflow based on triggers and content
+        is_ci = False
+        is_cd = False
+        
+        # Check trigger types
+        if "types:\n        - opened" in yaml_content or 'types: [opened]' in yaml_content or 'types:\n      - opened' in yaml_content:
+            is_ci = True
+        elif "types:\n        - closed" in yaml_content or 'types: [closed]' in yaml_content or 'types:\n      - closed' in yaml_content:
+            is_cd = True
+        
+        # Check workflow name
+        if "name: CI" in yaml_content or "name: ci" in yaml_content or "CI Pipeline" in yaml_content:
+            is_ci = True
+        elif "name: CD" in yaml_content or "name: cd" in yaml_content or "CD Pipeline" in yaml_content:
+            is_cd = True
+        
+        # Check content - CI has security scans, CD has deployment
+        if not is_ci and not is_cd:
+            if any(job in yaml_content.lower() for job in ["sast", "sca", "secrets-scan", "iac-scan"]):
+                is_ci = True
+            elif any(job in yaml_content.lower() for job in ["deploy", "infrastructure", "build"]):
+                is_cd = True
+        
+        # Assign to appropriate workflow
+        if is_ci:
+            workflows["ci"] = yaml_content
+            print("Identified CI workflow")
+        elif is_cd:
+            workflows["cd"] = yaml_content
+            print("Identified CD workflow")
+        else:
+            # If we can't determine, check if we already have one assigned
+            # If neither is set, assign based on order (first = CI, second = CD)
+            if not workflows["ci"]:
+                workflows["ci"] = yaml_content
+                print("Assigned first workflow as CI (default)")
+            elif not workflows["cd"]:
+                workflows["cd"] = yaml_content
+                print("Assigned second workflow as CD (default)")
+    
+    return workflows
+
+
 def is_yaml_complete(yaml_content):
     """Check if YAML content appears complete (not truncated mid-line or mid-block)."""
     if not yaml_content:
@@ -431,13 +510,15 @@ def execute_github_workflow(
     owner,
     repo_name,
     branch_name,
-    yaml_content,
+    yaml_content_ci,
+    yaml_content_cd,
     pr_title,
     pr_body,
     base_branch="main",
 ):
     """
     Orchestrate GitHub operations via the GitHub API Lambda.
+    Creates two separate workflow files: ci.yml and cd.yml
     Returns a dict with success flag plus individual operation responses.
     """
     if not GITHUB_API_FUNCTION_NAME:
@@ -468,20 +549,38 @@ def execute_github_workflow(
 
         # Generate unique commit message with timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
-        commit_message = f"Add CI/CD pipeline workflow - Generated at {timestamp}"
+        commit_message = f"Add CI/CD pipeline workflows - Generated at {timestamp}"
+        
+        # Prepare files array with both CI and CD workflows
+        files = []
+        
+        if yaml_content_ci:
+            files.append({
+                "path": ".github/workflows/ci.yml",
+                "content": yaml_content_ci,
+                "message": commit_message,
+            })
+        
+        if yaml_content_cd:
+            files.append({
+                "path": ".github/workflows/cd.yml",
+                "content": yaml_content_cd,
+                "message": commit_message,
+            })
+        
+        if not files:
+            return {
+                "success": False,
+                "error": "No workflow content provided (both CI and CD are empty)",
+                "operations": operations,
+            }
         
         file_payload = {
             "operation": "create_file",
             "owner": owner,
             "repo": repo_name,
             "branch": branch_name,
-            "files": [
-                {
-                    "path": ".github/workflows/ci-cd.yml",
-                    "content": yaml_content,
-                    "message": commit_message,
-                }
-            ],
+            "files": files,
         }
         file_resp = _normalize_github_lambda_response(
             invoke_lambda(GITHUB_API_FUNCTION_NAME, file_payload)
@@ -862,254 +961,166 @@ def lambda_handler(event, context):
             else:
                 ecs_guidance = format_prompt("ecs_guidance_variables")
             
-            base_prompt = format_prompt(
-                "yaml_generator_base",
+            # Generate CI workflow first (separate agent call)
+            print("Generating CI workflow...")
+            ci_prompt = format_prompt(
+                "yaml_generator_ci",
+                pipeline_design=pipeline_design,
+                repo_structure=repo_structure_context,
+            )
+            
+            max_ci_attempts = 3
+            yaml_content_ci = ""
+            ci_validation_errors = None
+            
+            for ci_attempt in range(1, max_ci_attempts + 1):
+                session_id = f"{task_id}-yaml-generator-ci-attempt-{ci_attempt}"
+                
+                if ci_attempt > 1 and ci_validation_errors:
+                    # Retry with validation errors
+                    prompt = f"{ci_prompt}\n\nPrevious attempt failed:\n{ci_validation_errors}\n\nPlease fix the issues and generate a complete CI workflow."
+                else:
+                    prompt = ci_prompt
+                
+                result = invoke_agent(
+                    agent_ids["yaml_generator"], AGENT_ALIAS_ID, session_id, prompt
+                )
+                workflow_steps.append(
+                    {"step": f"yaml_generator_ci_attempt_{ci_attempt}", "result": result}
+                )
+                upload_artifact_to_s3(task_id, f"yaml_generator_ci_attempt_{ci_attempt}", result)
+                update_task_status(task_id, "in_progress", {"steps": workflow_steps})
+                
+                if result.get("status") != "success":
+                    if ci_attempt == max_ci_attempts:
+                        update_task_status(task_id, "failed", {"error": "CI workflow generation failed", "step": "yaml_generator_ci"})
+                        return {"status": "error", "message": "CI workflow generation failed", "steps": workflow_steps}
+                    continue
+                
+                raw_output = result.get("completion", "")
+                yaml_content_ci = extract_yaml_content(raw_output)
+                
+                if not yaml_content_ci or len(yaml_content_ci.strip()) < 50:
+                    ci_validation_errors = "CI workflow is missing or too short. Generate a complete CI workflow with all security scanning jobs."
+                    if ci_attempt == max_ci_attempts:
+                        return {"status": "error", "message": "CI workflow content is empty or too short", "steps": workflow_steps}
+                    continue
+                
+                if not is_yaml_complete(yaml_content_ci):
+                    ci_validation_errors = "CI workflow appears incomplete or truncated. Ensure all security scanning jobs are complete."
+                    if ci_attempt == max_ci_attempts:
+                        return {"status": "error", "message": "CI workflow is incomplete", "steps": workflow_steps}
+                    continue
+                
+                # Validate CI workflow
+                if TEMPLATE_VALIDATOR_FUNCTION_NAME:
+                    validator_result = invoke_lambda(
+                        TEMPLATE_VALIDATOR_FUNCTION_NAME,
+                        {"yaml_content": yaml_content_ci, "validation_level": "normal"}
+                    )
+                    if not validator_result.get("valid", False):
+                        errors = validator_result.get("summary", {}).get("errors", []) or validator_result.get("syntax", {}).get("errors", [])
+                        ci_validation_errors = "\n".join(errors) if errors else "CI workflow validation failed"
+                        if ci_attempt == max_ci_attempts:
+                            return {"status": "error", "message": "CI workflow validation failed", "steps": workflow_steps}
+                        continue
+                
+                print(f"CI workflow generated successfully (length: {len(yaml_content_ci)})")
+                break
+            
+            if not yaml_content_ci:
+                return {"status": "error", "message": "Failed to generate CI workflow", "steps": workflow_steps}
+            
+            # Generate CD workflow (separate agent call)
+            print("Generating CD workflow...")
+            cd_prompt = format_prompt(
+                "yaml_generator_cd",
                 pipeline_design=pipeline_design,
                 ecr_guidance=ecr_guidance,
                 ecs_guidance=ecs_guidance,
                 repo_structure=repo_structure_context,
                 terraform_working_dir=terraform_working_dir,
             )
-
-            max_yaml_attempts = 3
-            yaml_content = ""
-            validation_errors = None
-
-            for attempt in range(1, max_yaml_attempts + 1):
-                session_id = f"{task_id}-yaml-generator-attempt-{attempt}"
+            
+            max_cd_attempts = 3
+            yaml_content_cd = ""
+            cd_validation_errors = None
+            
+            for cd_attempt in range(1, max_cd_attempts + 1):
+                session_id = f"{task_id}-yaml-generator-cd-attempt-{cd_attempt}"
                 
-                # Build prompt with validation errors if this is a retry after validation failure
-                if attempt == 1:
-                    prompt = base_prompt
-                elif validation_errors:
-                    # Retry with validation errors feedback
-                    prompt = format_prompt(
-                        "yaml_generator_retry",
-                        base_prompt=base_prompt,
-                        validation_errors=validation_errors,
-                        previous_yaml=yaml_content[:500] if yaml_content else "",
-                    )
+                if cd_attempt > 1 and cd_validation_errors:
+                    # Retry with validation errors
+                    prompt = f"{cd_prompt}\n\nPrevious attempt failed:\n{cd_validation_errors}\n\nPlease fix the issues and generate a complete CD workflow."
                 else:
-                    # Retry without validation errors (e.g., empty YAML)
-                    prompt = format_prompt(
-                        "yaml_generator_retry",
-                        base_prompt=base_prompt,
-                        validation_errors="The previous attempt did not produce valid YAML content. Ensure the workflow includes all required fields for every job (`runs-on:`, `steps:`).",
-                        previous_yaml="",
-                    )
-
+                    prompt = cd_prompt
+                
                 result = invoke_agent(
                     agent_ids["yaml_generator"], AGENT_ALIAS_ID, session_id, prompt
                 )
                 workflow_steps.append(
-                    {"step": f"yaml_generator_attempt_{attempt}", "result": result}
+                    {"step": f"yaml_generator_cd_attempt_{cd_attempt}", "result": result}
                 )
-                # Upload artifact to S3
-                upload_artifact_to_s3(task_id, f"yaml_generator_attempt_{attempt}", result)
-                # Update DynamoDB with current progress
+                upload_artifact_to_s3(task_id, f"yaml_generator_cd_attempt_{cd_attempt}", result)
                 update_task_status(task_id, "in_progress", {"steps": workflow_steps})
-
+                
                 if result.get("status") != "success":
-                    if attempt == max_yaml_attempts:
-                        # Upload error artifact
-                        upload_artifact_to_s3(task_id, "yaml_generator_final_error", result)
-                        update_task_status(
-                            task_id,
-                            "failed",
-                            {
-                                "error": "YAML generation failed",
-                                "step": "yaml_generator",
-                                "steps": workflow_steps,
-                            },
-                        )
-                        return {
-                            "status": "error",
-                            "message": "YAML generation failed",
-                            "steps": workflow_steps,
-                        }
-                    print(
-                        f"YAML generator attempt {attempt} failed with status {result.get('status')} – retrying."
-                    )
-                    continue
-
-                raw_yaml_output = result.get("completion", "")
-                print(f"Raw agent response length: {len(raw_yaml_output)}")
-                # Check if response might be truncated (ends abruptly without closing code fence)
-                if raw_yaml_output and not raw_yaml_output.rstrip().endswith("```"):
-                    # Check if it contains a YAML code block that's not closed
-                    if "```yaml" in raw_yaml_output or "```" in raw_yaml_output:
-                        yaml_blocks = raw_yaml_output.count("```")
-                        if yaml_blocks % 2 != 0:  # Odd number means unclosed block
-                            print(f"WARNING: Agent response appears truncated - unclosed code block detected")
-                            print(f"Response ends with: ...{raw_yaml_output[-300:]}")
-                
-                yaml_content = extract_yaml_content(raw_yaml_output)
-                print(f"Extracted YAML content length: {len(yaml_content)}")
-                if yaml_content:
-                    print(f"YAML preview (first 200 chars): {yaml_content[:200]}")
-                    print(f"YAML preview (last 200 chars): {yaml_content[-200:]}")
-
-                if not yaml_content or len(yaml_content.strip()) < 50:
-                    print(
-                        f"YAML generator attempt {attempt} did not include a usable workflow (length={len(yaml_content)})."
-                    )
-                    validation_errors = None
-                    yaml_content = ""
-                    if attempt == max_yaml_attempts:
-                        update_task_status(
-                            task_id,
-                            "failed",
-                            {
-                                "error": "YAML content is empty or too short",
-                                "step": "yaml_generator",
-                                "steps": workflow_steps,
-                            },
-                        )
-                        return {
-                            "status": "error",
-                            "message": "YAML content is empty or too short",
-                            "steps": workflow_steps,
-                        }
+                    if cd_attempt == max_cd_attempts:
+                        update_task_status(task_id, "failed", {"error": "CD workflow generation failed", "step": "yaml_generator_cd"})
+                        return {"status": "error", "message": "CD workflow generation failed", "steps": workflow_steps}
                     continue
                 
-                # Check if YAML appears complete (not truncated)
-                if not is_yaml_complete(yaml_content):
-                    print(f"YAML generator attempt {attempt} produced incomplete YAML (appears truncated).")
-                    # Check what's missing to provide specific feedback
+                raw_output = result.get("completion", "")
+                yaml_content_cd = extract_yaml_content(raw_output)
+                
+                if not yaml_content_cd or len(yaml_content_cd.strip()) < 50:
+                    cd_validation_errors = "CD workflow is missing or too short. Generate a complete CD workflow with infrastructure, build, and deploy jobs."
+                    if cd_attempt == max_cd_attempts:
+                        return {"status": "error", "message": "CD workflow content is empty or too short", "steps": workflow_steps}
+                    continue
+                
+                if not is_yaml_complete(yaml_content_cd):
                     missing_parts = []
-                    if "deploy:" in yaml_content.lower():
-                        deploy_section = yaml_content[yaml_content.lower().rfind("deploy:"):]
-                        if "aws ecs update-service" not in deploy_section.lower() and "ecs update-service" not in deploy_section.lower():
-                            missing_parts.append("The deploy job is missing the actual ECS deployment command (e.g., `aws ecs update-service --cluster ... --service ... --force-new-deployment`)")
-                        if deploy_section.count("run:") < 2:  # Should have at least 2 run steps (credentials + deployment)
-                            missing_parts.append("The deploy job appears to have incomplete steps")
-                    
-                    # Check if workflow ends mid-step
-                    last_lines = [l.strip() for l in yaml_content.splitlines()[-10:] if l.strip()]
-                    if last_lines:
-                        last_line = last_lines[-1]
-                        if any(phrase in last_line.lower() for phrase in ["exit 1", "echo \"error", "if [[ -z"]):
-                            missing_parts.append("The workflow appears to end mid-step - ensure all steps are complete and the deploy job includes the actual deployment command")
-                    
-                    error_msg = "YAML content appears incomplete or truncated. "
-                    if missing_parts:
-                        error_msg += "CRITICAL ISSUES:\n" + "\n".join(f"- {part}" for part in missing_parts)
-                    else:
-                        error_msg += "Ensure the entire workflow is generated, including all jobs and steps. The workflow must be complete from start to finish, especially the deploy job which must include the actual ECS update-service command."
-                    
-                    validation_errors = error_msg
-                    print(f"YAML completeness check failed. Issues detected: {missing_parts}")
-                    if attempt == max_yaml_attempts:
-                        update_task_status(
-                            task_id,
-                            "failed",
-                            {
-                                "error": "YAML content is incomplete or truncated",
-                                "step": "yaml_generator",
-                                "steps": workflow_steps,
-                            },
-                        )
-                        return {
-                            "status": "error",
-                            "message": "YAML content is incomplete or truncated",
-                            "steps": workflow_steps,
-                        }
+                    if "deploy:" in yaml_content_cd.lower():
+                        deploy_section = yaml_content_cd[yaml_content_cd.lower().rfind("deploy:"):]
+                        if "aws ecs update-service" not in deploy_section.lower():
+                            missing_parts.append("Deploy job missing ECS update-service command")
+                    cd_validation_errors = "CD workflow appears incomplete. " + ("; ".join(missing_parts) if missing_parts else "Ensure all jobs are complete.")
+                    if cd_attempt == max_cd_attempts:
+                        return {"status": "error", "message": "CD workflow is incomplete", "steps": workflow_steps}
                     continue
-
-                # Validate YAML if validator is available
-                validation_passed = True
+                
+                # Validate CD workflow
                 if TEMPLATE_VALIDATOR_FUNCTION_NAME:
-                    validator_payload = {
-                        "yaml_content": yaml_content,
-                        "validation_level": "normal",
-                    }
                     validator_result = invoke_lambda(
-                        TEMPLATE_VALIDATOR_FUNCTION_NAME, validator_payload
+                        TEMPLATE_VALIDATOR_FUNCTION_NAME,
+                        {"yaml_content": yaml_content_cd, "validation_level": "normal"}
                     )
-                    if "status" not in validator_result:
-                        validator_result["status"] = (
-                            "success"
-                            if validator_result.get("valid")
-                            else "validation_failed"
-                        )
-                    workflow_steps.append(
-                        {"step": f"template_validator_attempt_{attempt}", "result": validator_result}
-                    )
-                    # Upload artifact to S3
-                    upload_artifact_to_s3(task_id, f"template_validator_attempt_{attempt}", validator_result)
-                    # Also upload the YAML content that was validated
-                    if yaml_content:
-                        upload_artifact_to_s3(task_id, f"yaml_content_attempt_{attempt}", yaml_content, "yaml")
-                    # Update DynamoDB with current progress
-                    update_task_status(task_id, "in_progress", {"steps": workflow_steps})
-                    
                     if not validator_result.get("valid", False):
-                        validation_passed = False
-                        summary_errors = (
-                            validator_result.get("summary", {}).get("errors")
-                            or validator_result.get("syntax", {}).get("errors")
-                            or []
-                        )
-                        validation_errors = "\n".join(summary_errors) if summary_errors else "Validation failed with unknown errors"
-                        detail = "; ".join(summary_errors[:5])
-                        print(f"Template validator errors on attempt {attempt}: {summary_errors}")
-                        print(f"Invalid YAML content:\n{yaml_content[:500]}")
-                        
-                        if attempt == max_yaml_attempts:
-                            error_msg = "Template validator reported invalid YAML" + (
-                                f": {detail}" if detail else ""
-                            )
-                            # Upload error artifact
-                            error_artifact = {
-                                "error": error_msg,
-                                "validator_result": validator_result,
-                                "yaml_content": yaml_content[:1000] if yaml_content else None,  # First 1000 chars for debugging
-                                "workflow_steps": workflow_steps
-                            }
-                            upload_artifact_to_s3(task_id, "template_validator_error", error_artifact)
-                            update_task_status(
-                                task_id,
-                                "failed",
-                                {
-                                    "error": error_msg,
-                                    "step": "template_validator",
-                                    "steps": workflow_steps,
-                                },
-                            )
-                            return {
-                                "status": "error",
-                                "message": error_msg,
-                                "steps": workflow_steps,
-                            }
-                        print(f"Validation failed on attempt {attempt} – retrying with error feedback.")
+                        errors = validator_result.get("summary", {}).get("errors", []) or validator_result.get("syntax", {}).get("errors", [])
+                        cd_validation_errors = "\n".join(errors) if errors else "CD workflow validation failed"
+                        if cd_attempt == max_cd_attempts:
+                            return {"status": "error", "message": "CD workflow validation failed", "steps": workflow_steps}
                         continue
-                    else:
-                        print(f"Validation passed on attempt {attempt}.")
-                        validation_errors = None
-
-                # If we get here, YAML is valid and we can break
-                if validation_passed:
-                    break
-
-            if not yaml_content:
+                
+                print(f"CD workflow generated successfully (length: {len(yaml_content_cd)})")
+                break
+            
+            if not yaml_content_cd:
                 update_task_status(
                     task_id,
                     "failed",
                     {
-                        "error": "YAML content is empty or too short",
-                        "step": "yaml_generator",
+                        "error": "Failed to generate CD workflow",
+                        "step": "yaml_generator_cd",
                         "steps": workflow_steps,
                     },
                 )
                 return {
                     "status": "error",
-                    "message": "YAML content is empty or too short",
+                    "message": "Failed to generate CD workflow",
                     "steps": workflow_steps,
                 }
-            else:
-                print(
-                    "Warning: TEMPLATE_VALIDATOR_FUNCTION_NAME not set, skipping YAML validation"
-                )
 
         # Step 6: PR Manager Agent (documentation only)
         pr_body = ""
@@ -1126,11 +1137,14 @@ def lambda_handler(event, context):
             security_summary = (
                 security_recommendations or "Security review not available."
             )
-            yaml_section = (
-                f"```yaml\n{yaml_content}\n```"
-                if yaml_content
-                else "YAML generation failed."
-            )
+            # Combine both workflows for PR description
+            yaml_section = ""
+            if yaml_content_ci:
+                yaml_section += "## CI Workflow\n```yaml\n" + yaml_content_ci + "\n```\n\n"
+            if yaml_content_cd:
+                yaml_section += "## CD Workflow\n```yaml\n" + yaml_content_cd + "\n```\n"
+            if not yaml_section:
+                yaml_section = "YAML generation failed."
 
             input_text = format_prompt(
                 "pr_manager",
@@ -1168,14 +1182,15 @@ def lambda_handler(event, context):
                 timestamp=timestamp,
             )
 
-        if yaml_content:
+        if yaml_content_ci and yaml_content_cd:
             # Use consistent branch name for CI/CD generation
             github_branch = "gen-ai/cicd-generation"
             github_result = execute_github_workflow(
                 repo_owner,
                 repo_name,
                 github_branch,
-                yaml_content,
+                yaml_content_ci,
+                yaml_content_cd,
                 pr_title,
                 pr_body,
                 base_branch=branch,
@@ -1189,8 +1204,10 @@ def lambda_handler(event, context):
             # Upload artifact to S3
             upload_artifact_to_s3(task_id, "github_operations", github_result)
             # Also upload the final YAML content that was committed
-            if yaml_content:
-                upload_artifact_to_s3(task_id, "final_yaml_content", yaml_content, "yaml")
+            if yaml_content_ci:
+                upload_artifact_to_s3(task_id, "final_yaml_content_ci", yaml_content_ci, "yaml")
+            if yaml_content_cd:
+                upload_artifact_to_s3(task_id, "final_yaml_content_cd", yaml_content_cd, "yaml")
             # Update DynamoDB with current progress (final step)
             update_task_status(task_id, "in_progress", {"steps": workflow_steps})
 
@@ -1211,10 +1228,12 @@ def lambda_handler(event, context):
                     "steps": workflow_steps,
                 }
         else:
-            error_msg = "YAML content missing; cannot update GitHub"
+            error_msg = "One or both workflow contents missing; cannot update GitHub"
             # Upload error artifact
             error_artifact = {
                 "error": error_msg,
+                "has_ci": bool(yaml_content_ci),
+                "has_cd": bool(yaml_content_cd),
                 "workflow_steps": workflow_steps
             }
             upload_artifact_to_s3(task_id, "yaml_content_missing_error", error_artifact)
